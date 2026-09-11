@@ -12,8 +12,9 @@ config = {
     "vector_store": {
         "provider": "qdrant",
         "config": {
-            "collection_name": "clicky_memories_v2",
+            "collection_name": "clicky_memories_v3",
             "path": "./qdrant_data",  # Local file persistence
+            "embedding_model_dims": 768
         }
     },
     "llm": {
@@ -76,7 +77,7 @@ def search_memory(req: SearchRequest):
     
     try:
         # Search for memories
-        results = memory.search(query=req.query, user_id=req.user_id, limit=req.limit)
+        results = memory.search(query=req.query, filters={"user_id": req.user_id}, limit=req.limit)
         return {"status": "success", "results": results}
     except Exception as e:
         import traceback
