@@ -604,7 +604,6 @@
 				minimumVersion = 2.9.0;
 			};
 		};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
