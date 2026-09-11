@@ -20,7 +20,7 @@ config = {
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": "deepseek-coder-v2:lite",
+            "model": "clicky-llm",
             "ollama_base_url": "http://localhost:11434"
         }
     },

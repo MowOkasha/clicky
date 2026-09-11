@@ -83,6 +83,9 @@ final class CompanionManager: ObservableObject {
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's transcript and Claude's response.
     private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
+    
+    /// Unsaved memory exchanges waiting to be sent to Mem0 in a batch to save LLM context/processing overhead.
+    private var pendingMemories: [(userTranscript: String, assistantResponse: String)] = []
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
@@ -274,6 +277,7 @@ final class CompanionManager: ObservableObject {
         audioPowerCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
+        flushPendingMemories()
     }
 
     func refreshAllPermissions() {
@@ -704,8 +708,11 @@ final class CompanionManager: ObservableObject {
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 
-                // Step 8: Save to persistent Mem0 storage
-                Mem0Client.shared.addConversationToMemory(userTranscript: transcript, assistantResponse: spokenText)
+                // Step 8: Batch save to persistent Mem0 storage
+                pendingMemories.append((userTranscript: transcript, assistantResponse: spokenText))
+                if pendingMemories.count >= 5 {
+                    flushPendingMemories()
+                }
 
                 // Play the response via TTS. Keep the spinner (processing state)
                 // until the audio actually starts playing, then switch to responding.
@@ -1051,5 +1058,13 @@ final class CompanionManager: ObservableObject {
                 OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
             }
         }
+    }
+    
+    /// Flushes any pending memories to Mem0 immediately.
+    private func flushPendingMemories() {
+        guard !pendingMemories.isEmpty else { return }
+        print("🧠 Flushing \(pendingMemories.count) pending memories to Mem0...")
+        Mem0Client.shared.addConversationsBatch(exchanges: pendingMemories)
+        pendingMemories.removeAll()
     }
 }

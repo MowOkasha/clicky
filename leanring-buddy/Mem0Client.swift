@@ -39,29 +39,36 @@ class Mem0Client {
         return false
     }
     
-    /// Adds a conversational exchange to Mem0.
-    func addConversationToMemory(userTranscript: String, assistantResponse: String) {
+    /// Adds a batch of conversational exchanges to Mem0.
+    func addConversationsBatch(exchanges: [(userTranscript: String, assistantResponse: String)]) {
+        guard !exchanges.isEmpty else { return }
+        
         Task {
             var request = URLRequest(url: baseURL.appendingPathComponent("add"))
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             
+            var messages: [[String: String]] = []
+            for exchange in exchanges {
+                messages.append(["role": "user", "content": exchange.userTranscript])
+                messages.append(["role": "assistant", "content": exchange.assistantResponse])
+            }
+            
             let body: [String: Any] = [
                 "user_id": "clicky_user",
-                "messages": [
-                    ["role": "user", "content": userTranscript],
-                    ["role": "assistant", "content": assistantResponse]
-                ]
+                "messages": messages
             ]
             
             do {
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
                 let (_, response) = try await session.data(for: request)
                 if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                    print("⚠️ Mem0Client: Failed to add memory (status \(httpResponse.statusCode))")
+                    print("⚠️ Mem0Client: Failed to add memory batch (status \(httpResponse.statusCode))")
+                } else {
+                    print("🧠 Mem0Client: Successfully added batch of \(exchanges.count) exchanges to memory.")
                 }
             } catch {
-                print("⚠️ Mem0Client: Network error adding memory: \(error)")
+                print("⚠️ Mem0Client: Network error adding memory batch: \(error)")
             }
         }
     }
