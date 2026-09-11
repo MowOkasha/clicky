@@ -1,0 +1,11 @@
+[project]
+name = "memory-server"
+version = "0.1.0"
+description = "Mem0 sidecar server for Clicky"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "mem0ai>=0.0.19",
+    "qdrant-client>=1.7.0",
+]
