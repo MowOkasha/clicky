@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from mem0 import Memory
 import os
 
+os.environ["MEM0_ENABLE_TELEMETRY"] = "false"
+
 app = FastAPI()
 
 # Configure Mem0 to use local Qdrant (file persistence) and Ollama for embeddings/llm
@@ -10,22 +12,23 @@ config = {
     "vector_store": {
         "provider": "qdrant",
         "config": {
-            "collection_name": "clicky_memories",
+            "collection_name": "clicky_memories_v2",
             "path": "./qdrant_data",  # Local file persistence
         }
     },
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": "qwen2.5:7b",
+            "model": "deepseek-coder-v2:lite",
             "ollama_base_url": "http://localhost:11434"
         }
     },
     "embedder": {
         "provider": "ollama",
         "config": {
-            "model": "qwen2.5:7b",
-            "ollama_base_url": "http://localhost:11434"
+            "model": "nomic-embed-text",
+            "ollama_base_url": "http://localhost:11434",
+            "embedding_dims": 768
         }
     }
 }
@@ -62,6 +65,8 @@ def add_memory(req: AddRequest):
         result = memory.add(req.messages, user_id=req.user_id)
         return {"status": "success", "result": result}
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/search")
@@ -74,6 +79,8 @@ def search_memory(req: SearchRequest):
         results = memory.search(query=req.query, user_id=req.user_id, limit=req.limit)
         return {"status": "success", "results": results}
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
