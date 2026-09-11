@@ -18,14 +18,14 @@ config = {
         "provider": "ollama",
         "config": {
             "model": "qwen2.5:7b",
-            "base_url": "http://localhost:11434"
+            "ollama_base_url": "http://localhost:11434"
         }
     },
     "embedder": {
         "provider": "ollama",
         "config": {
             "model": "qwen2.5:7b",
-            "base_url": "http://localhost:11434"
+            "ollama_base_url": "http://localhost:11434"
         }
     }
 }
