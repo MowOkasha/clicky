@@ -488,7 +488,7 @@ final class CompanionManager: ObservableObject {
                     submitDraftText: { [weak self] finalTranscript in
                         self?.lastTranscript = finalTranscript
                         print("🗣️ Companion received transcript: \(finalTranscript)")
-                        self?.sendTranscriptWithScreenshot(transcript: finalTranscript)
+                        self?.processUserTranscript(transcript: finalTranscript)
                     }
                 )
             }
@@ -549,7 +549,7 @@ final class CompanionManager: ObservableObject {
     /// the spinner/processing state until TTS audio begins playing.
     /// Claude's response may include a [POINT:x,y:label] tag which triggers
     /// the buddy to fly to that element on screen.
-    private func sendTranscriptWithScreenshot(transcript: String) {
+    private func processUserTranscript(transcript: String) {
         currentResponseTask?.cancel()
         localTTSClient.stopPlayback()
 
@@ -558,24 +558,49 @@ final class CompanionManager: ObservableObject {
             voiceState = .processing
 
             do {
-                // Step 1: Capture screenshots
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-
-                guard !Task.isCancelled else { return }
-
-                // Build image labels
-                let labeledImages = screenCaptures.map { capture in
-                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                    return (data: capture.imageData, label: capture.label + dimensionInfo)
+                // Step 1: Initial MoE check to see if vision is needed
+                let visionCheckPrompt = "Does the following user request require looking at their screen to answer? Respond ONLY with 'YES' or 'NO'."
+                let historyForAPI = conversationHistory.map { entry in
+                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
-                // Step 2: Extract vision context via qwen2.5vl:7b
-                let visionContext = try await localVisionProcessor.analyzeScreenshots(
-                    images: labeledImages,
-                    userTranscript: transcript
+                let (visionCheckResponse, _) = try await ollamaAPI.analyzeImageStreaming(
+                    images: [],
+                    systemPrompt: visionCheckPrompt,
+                    conversationHistory: historyForAPI,
+                    userPrompt: transcript,
+                    onTextChunk: { _ in }
                 )
-
+                
+                // Immediately unload the reasoning model
+                OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
                 guard !Task.isCancelled else { return }
+
+                let needsVision = visionCheckResponse.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().contains("YES")
+                let visionResultString = needsVision ? "YES" : "NO"
+                print("👁️ Vision check for '\(transcript)': \(visionResultString)")
+
+                var visionContext = "No visual context required or requested for this interaction."
+                var screenCaptures: [CompanionScreenCapture] = []
+
+                if needsVision {
+                    // Step 2a: Capture screenshots
+                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                    guard !Task.isCancelled else { return }
+
+                    // Build image labels
+                    let labeledImages = screenCaptures.map { capture in
+                        let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                        return (data: capture.imageData, label: capture.label + dimensionInfo)
+                    }
+
+                    // Step 2b: Extract vision context via qwen2.5vl:7b
+                    visionContext = try await localVisionProcessor.analyzeScreenshots(
+                        images: labeledImages,
+                        userTranscript: transcript
+                    )
+                    guard !Task.isCancelled else { return }
+                }
 
                 // Step 3: Retrieve relevant memories
                 let memories = await Mem0Client.shared.searchRelevantMemories(forQuery: transcript)
@@ -584,17 +609,13 @@ final class CompanionManager: ObservableObject {
                 // Step 4: Reasoning via deepseek-coder-v2:lite
                 // Build the enriched prompt combining vision + memory + user intent
                 let enrichedPrompt = """
-                User's visual context (from screen analysis):
+                User's visual context:
                 \(visionContext)
                 \(memoryContext)
                 
                 User's request:
                 \(transcript)
                 """
-
-                let historyForAPI = conversationHistory.map { entry in
-                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
-                }
 
                 let (fullResponseText, _) = try await ollamaAPI.analyzeImageStreaming(
                     images: [], // Images already processed by vision model

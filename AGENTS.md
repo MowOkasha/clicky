@@ -27,16 +27,18 @@ All AI inference runs locally via Ollama — no external API keys or network cal
 
 ### Local AI Pipeline (per interaction)
 
-```
+```text
 User speaks (ctrl+option held)
   → Apple SFSpeechRecognizer → transcript
-  → ScreenCaptureKit → screenshots
-  → qwen2.5vl:7b (Ollama)  → structured screen description  → UNLOAD
-  → Mem0 sidecar           → retrieve relevant past memories
-  → deepseek-coder-v2:lite (Ollama) → response text (with optional [POINT:...] tag) → UNLOAD
-  → Mem0 sidecar           → save this exchange
-  → AVSpeechSynthesizer    → spoken audio
-  → Cursor overlay          → animate to pointed element (if any)
+  → deepseek-coder-v2:lite (MoE) check if vision needed? → UNLOAD
+  → If YES:
+      → ScreenCaptureKit → screenshots
+      → qwen2.5vl:7b (Ollama) → screen description → UNLOAD
+  → Mem0 sidecar → retrieve relevant past memories
+  → deepseek-coder-v2:lite (Ollama) → response text (with optional [POINT:...]) → UNLOAD
+  → Mem0 sidecar → save this exchange
+  → AVSpeechSynthesizer → spoken audio
+  → Cursor overlay → animate to pointed element (if any)
 ```
 
 ### Key Architecture Decisions
