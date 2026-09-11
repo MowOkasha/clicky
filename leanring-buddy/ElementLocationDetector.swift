@@ -64,6 +64,8 @@ class ElementLocationDetector {
         If the question is conceptual (e.g., "what does HTML mean?") and there is no specific element to point at, respond ONLY with:
         {"found": false}
         
+        WARNING: Do NOT guess, invent, or hallucinate elements. If the element the user is asking about is NOT clearly and explicitly visible on the screen, respond ONLY with {"found": false}. You must be strictly factual.
+        
         Do NOT include any other text, explanation, or markdown. Only output the JSON object.
         """
 
@@ -74,7 +76,8 @@ class ElementLocationDetector {
                 images: [(data: screenshotData, label: "screenshot")],
                 systemPrompt: systemPrompt,
                 conversationHistory: [],
-                userPrompt: userPrompt
+                userPrompt: userPrompt,
+                temperature: 0.0
             )
 
             // Immediately unload the vision model to free RAM/VRAM

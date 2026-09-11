@@ -42,6 +42,7 @@ class OllamaAPI {
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
+        temperature: Double? = nil,
         onTextChunk: @MainActor @Sendable (String) -> Void
     ) async throws -> (text: String, duration: TimeInterval) {
         return try await GlobalOllamaLock.shared.withLock {
@@ -87,11 +88,15 @@ class OllamaAPI {
         
         messages.append(userMessage)
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "stream": true,
             "messages": messages
         ]
+        
+        if let temp = temperature {
+            body["options"] = ["temperature": temp]
+        }
 
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         request.httpBody = bodyData
@@ -153,7 +158,8 @@ class OllamaAPI {
         images: [(data: Data, label: String)],
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
-        userPrompt: String
+        userPrompt: String,
+        temperature: Double? = nil
     ) async throws -> (text: String, duration: TimeInterval) {
         return try await GlobalOllamaLock.shared.withLock {
             let startTime = Date()
@@ -196,11 +202,15 @@ class OllamaAPI {
         
         messages.append(userMessage)
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "stream": false,
             "messages": messages
         ]
+        
+        if let temp = temperature {
+            body["options"] = ["temperature": temp]
+        }
 
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         request.httpBody = bodyData

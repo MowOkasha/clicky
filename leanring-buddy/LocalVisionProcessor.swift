@@ -26,6 +26,8 @@ class LocalVisionProcessor {
     - Visible Elements: [List buttons, menus, icons, or UI elements relevant to the request]
     - Element Locations: [If the user is asking to click or find something, describe its approximate location, e.g., 'top-right corner', 'left sidebar']
     
+    WARNING: Do NOT invent, guess, or hallucinate any text or elements. If an element or text is not clearly visible on the screen, do not mention it under any circumstances. You must be strictly factual and literal.
+    
     Do NOT answer the user's question. ONLY describe the screen content.
     """
 
@@ -45,7 +47,8 @@ class LocalVisionProcessor {
                 images: images,
                 systemPrompt: systemPrompt,
                 conversationHistory: [],
-                userPrompt: "The user said: \"\(userTranscript)\". Describe the screen content relevant to this."
+                userPrompt: "The user said: \"\(userTranscript)\". Describe the screen content relevant to this.",
+                temperature: 0.0
             )
             
             print("👁️ LocalVisionProcessor: Completed in \(String(format: "%.1f", duration))s")
