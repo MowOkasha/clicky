@@ -44,7 +44,8 @@ class OllamaAPI {
         userPrompt: String,
         onTextChunk: @MainActor @Sendable (String) -> Void
     ) async throws -> (text: String, duration: TimeInterval) {
-        let startTime = Date()
+        return try await GlobalOllamaLock.shared.withLock {
+            let startTime = Date()
 
         var request = makeAPIRequest()
 
@@ -142,8 +143,9 @@ class OllamaAPI {
             }
         }
 
-        let duration = Date().timeIntervalSince(startTime)
-        return (text: accumulatedResponseText, duration: duration)
+            let duration = Date().timeIntervalSince(startTime)
+            return (text: accumulatedResponseText, duration: duration)
+        }
     }
 
     /// Non-streaming fallback for validation requests where we don't need progressive display.
@@ -153,7 +155,8 @@ class OllamaAPI {
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String
     ) async throws -> (text: String, duration: TimeInterval) {
-        let startTime = Date()
+        return try await GlobalOllamaLock.shared.withLock {
+            let startTime = Date()
 
         var request = makeAPIRequest()
 
@@ -226,7 +229,8 @@ class OllamaAPI {
             )
         }
 
-        let duration = Date().timeIntervalSince(startTime)
-        return (text: text, duration: duration)
+            let duration = Date().timeIntervalSince(startTime)
+            return (text: text, duration: duration)
+        }
     }
 }

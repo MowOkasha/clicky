@@ -28,28 +28,30 @@ class OllamaModelMemoryManager {
     /// Unloads a specific model from Ollama's memory immediately.
     func unloadModel(_ model: String) {
         Task {
-            var request = URLRequest(url: apiURL)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            await GlobalOllamaLock.shared.withLock {
+                var request = URLRequest(url: apiURL)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-            let body: [String: Any] = [
-                "model": model,
-                "keep_alive": 0
-            ]
+                let body: [String: Any] = [
+                    "model": model,
+                    "keep_alive": 0
+                ]
 
-            do {
-                request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                print("🧹 OllamaModelMemoryManager: Unloading model '\(model)' from memory...")
-                let (data, response) = try await session.data(for: request)
-                
-                if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                    print("✅ OllamaModelMemoryManager: Successfully unloaded '\(model)'")
-                } else {
-                    let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-                    print("⚠️ OllamaModelMemoryManager: Failed to unload '\(model)'. Error: \(errorBody)")
+                do {
+                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    print("🧹 OllamaModelMemoryManager: Unloading model '\(model)' from memory...")
+                    let (data, response) = try await session.data(for: request)
+                    
+                    if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
+                        print("✅ OllamaModelMemoryManager: Successfully unloaded '\(model)'")
+                    } else {
+                        let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+                        print("⚠️ OllamaModelMemoryManager: Failed to unload '\(model)'. Error: \(errorBody)")
+                    }
+                } catch {
+                    print("⚠️ OllamaModelMemoryManager: Network error while unloading '\(model)': \(error.localizedDescription)")
                 }
-            } catch {
-                print("⚠️ OllamaModelMemoryManager: Network error while unloading '\(model)': \(error.localizedDescription)")
             }
         }
     }

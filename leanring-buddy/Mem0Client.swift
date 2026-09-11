@@ -44,68 +44,72 @@ class Mem0Client {
         guard !exchanges.isEmpty else { return }
         
         Task {
-            var request = URLRequest(url: baseURL.appendingPathComponent("add"))
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            
-            var messages: [[String: String]] = []
-            for exchange in exchanges {
-                messages.append(["role": "user", "content": exchange.userTranscript])
-                messages.append(["role": "assistant", "content": exchange.assistantResponse])
-            }
-            
-            let body: [String: Any] = [
-                "user_id": "clicky_user",
-                "messages": messages
-            ]
-            
-            do {
-                request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                let (_, response) = try await session.data(for: request)
-                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                    print("⚠️ Mem0Client: Failed to add memory batch (status \(httpResponse.statusCode))")
-                } else {
-                    print("🧠 Mem0Client: Successfully added batch of \(exchanges.count) exchanges to memory.")
+            await GlobalOllamaLock.shared.withLock {
+                var request = URLRequest(url: baseURL.appendingPathComponent("add"))
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                
+                var messages: [[String: String]] = []
+                for exchange in exchanges {
+                    messages.append(["role": "user", "content": exchange.userTranscript])
+                    messages.append(["role": "assistant", "content": exchange.assistantResponse])
                 }
-            } catch {
-                print("⚠️ Mem0Client: Network error adding memory batch: \(error)")
+                
+                let body: [String: Any] = [
+                    "user_id": "clicky_user",
+                    "messages": messages
+                ]
+                
+                do {
+                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let (_, response) = try await session.data(for: request)
+                    if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                        print("⚠️ Mem0Client: Failed to add memory batch (status \(httpResponse.statusCode))")
+                    } else {
+                        print("🧠 Mem0Client: Successfully added batch of \(exchanges.count) exchanges to memory.")
+                    }
+                } catch {
+                    print("⚠️ Mem0Client: Network error adding memory batch: \(error)")
+                }
             }
         }
     }
     
     /// Searches for relevant past memories based on the current query.
     func searchRelevantMemories(forQuery query: String, limit: Int = 3) async -> [String] {
-        var request = URLRequest(url: baseURL.appendingPathComponent("search"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let body: [String: Any] = [
-            "user_id": "clicky_user",
-            "query": query,
-            "limit": limit
-        ]
-        
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (data, response) = try await session.data(for: request)
+        return await GlobalOllamaLock.shared.withLock {
+            var request = URLRequest(url: baseURL.appendingPathComponent("search"))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                print("⚠️ Mem0Client: Search failed")
+            let body: [String: Any] = [
+                "user_id": "clicky_user",
+                "query": query,
+                "limit": limit
+            ]
+            
+            do {
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let (data, response) = try await session.data(for: request)
+                
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    print("⚠️ Mem0Client: Search failed")
+                    return []
+                }
+                
+                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                guard let results = json?["results"] as? [[String: Any]] else {
+                    return []
+                }
+                
+                // Extract the 'memory' text from each result
+                let memories = results.compactMap { $0["memory"] as? String }
+                return memories
+                
+            } catch {
+                print("⚠️ Mem0Client: Network error searching memory: \(error)")
                 return []
             }
-            
-            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            guard let results = json?["results"] as? [[String: Any]] else {
-                return []
-            }
-            
-            // Extract the 'memory' text from each result
-            let memories = results.compactMap { $0["memory"] as? String }
-            return memories
-            
-        } catch {
-            print("⚠️ Mem0Client: Network error searching memory: \(error)")
-            return []
         }
     }
 }
