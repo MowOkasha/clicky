@@ -277,7 +277,8 @@ final class CompanionManager: ObservableObject {
         audioPowerCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
-        flushPendingMemories()
+        // Fire-and-forget on quit — the process lives long enough for the HTTP call to complete
+        Task { await flushPendingMemories() }
     }
 
     func refreshAllPermissions() {
@@ -512,38 +513,40 @@ final class CompanionManager: ObservableObject {
     // MARK: - Companion Prompt
 
     private static let companionVoiceResponseSystemPrompt = """
-    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and a vision model has analyzed their screen and provided you a detailed description of what's visible, including pixel coordinates for every UI element. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
     - all lowercase, casual, warm. no emojis.
     - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
     - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
-    - if the user's question relates to what's on their screen, reference specific things you see.
-    - if the screenshot doesn't seem relevant to their question, just answer the question directly.
+    - if the user's question relates to what's on their screen, reference specific things from the visual context description.
+    - if the screen context doesn't seem relevant to their question, just answer the question directly.
     - you can help with anything — coding, writing, general knowledge, brainstorming.
     - never say "simply" or "just".
     - don't read out code verbatim. describe what the code does or what needs to change conversationally.
     - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
     - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
-    - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
+    - if multiple screens are described, the one labeled "primary focus" or "cursor is here" is where the user's cursor is — prioritize that one but reference others if relevant.
 
     element pointing:
     you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
 
-    don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at. but if there's a specific UI element, menu, button, or area on screen that's relevant to what you're helping with, point at it.
+    don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at.
 
-    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
+    IMPORTANT: you do NOT see the screenshots directly — you receive a text description of the screen from a vision model. that description includes [x, y] pixel coordinates for every element it describes (for example: "a folder labeled 'Projects' at [450, 320]"). when you want to point at something, find the matching element in the visual context and use the EXACT coordinates from the description. do NOT invent or estimate coordinates — only use coordinates that appear explicitly in the visual context.
 
-    format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
+    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the origin (0,0) is the top-left corner of the screenshot, x increases rightward, y increases downward.
 
-    if pointing wouldn't help, append [POINT:none].
+    format: [POINT:x,y:label] where x,y are the integer pixel coordinates you read from the visual context description, and label is a short 1-3 word description of the element. if the element is on a secondary screen, append :screenN where N matches the screen number in the visual context (e.g. :screen2).
+
+    if pointing wouldn't help, or if the element's coordinates are not present in the visual context, append [POINT:none].
 
     examples:
-    - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
-    - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
-    - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
-    - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
+    - user asks where the Projects folder is, visual context says "a folder labeled 'Projects' at [450, 320]": "that's the Projects folder right there on your desktop. [POINT:450,320:Projects folder]"
+    - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. [POINT:none]"
+    - user asks how to commit in xcode, visual context says "Source Control menu in the menu bar at [285, 11]": "see that source control menu up top? click that and hit commit, or you can use command option c. [POINT:285,11:source control]"
+    - element is on screen 2, visual context says "terminal window at [400, 300] on screen 2": "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
     // MARK: - AI Response Pipeline
@@ -562,51 +565,30 @@ final class CompanionManager: ObservableObject {
             voiceState = .processing
 
             do {
-                // Step 1: Initial MoE check to see if vision is needed
-                let visionCheckPrompt = "Does the following user request require looking at their screen to answer? Respond ONLY with 'YES' or 'NO'."
                 let historyForAPI = conversationHistory.map { entry in
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
-                let (visionCheckResponse, _) = try await ollamaAPI.analyzeImageStreaming(
-                    images: [],
-                    systemPrompt: visionCheckPrompt,
-                    conversationHistory: historyForAPI,
-                    userPrompt: transcript,
-                    onTextChunk: { _ in }
-                )
-                
-                // Immediately unload the reasoning model
-                OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
+                // Step 1: Capture screenshots of all connected displays
+                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
                 guard !Task.isCancelled else { return }
 
-                let needsVision = visionCheckResponse.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().contains("YES")
-                let visionResultString = needsVision ? "YES" : "NO"
-                print("👁️ Vision check for '\(transcript)': \(visionResultString)")
-
-                var visionContext = "No visual context required or requested for this interaction."
-                var screenCaptures: [CompanionScreenCapture] = []
-
-                if needsVision {
-                    // Step 2a: Capture screenshots
-                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-                    guard !Task.isCancelled else { return }
-
-                    // Build image labels
-                    let labeledImages = screenCaptures.map { capture in
-                        let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                        return (data: capture.imageData, label: capture.label + dimensionInfo)
-                    }
-
-                    // Step 2b: Extract vision context via qwen2.5vl:7b
-                    visionContext = try await localVisionProcessor.analyzeScreenshots(
-                        images: labeledImages,
-                        userTranscript: transcript
-                    )
-                    guard !Task.isCancelled else { return }
+                // Build labeled image array so the vision model knows which screen is which
+                let labeledImages = screenCaptures.map { capture in
+                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                    return (data: capture.imageData, label: capture.label + dimensionInfo)
                 }
 
-                // Step 3: Retrieve relevant memories
+                // Step 2: Describe the screen via qwen2.5vl:7b, then unload it
+                // analyzeScreenshots awaits its own unloadModel call before returning,
+                // so qwen is fully out of RAM before deepseek loads in Step 4.
+                let visionContext = try await localVisionProcessor.analyzeScreenshots(
+                    images: labeledImages,
+                    userTranscript: transcript
+                )
+                guard !Task.isCancelled else { return }
+
+                // Step 3: Retrieve relevant memories (no model load — calls the Mem0 sidecar only)
                 let memories = await Mem0Client.shared.searchRelevantMemories(forQuery: transcript)
                 let memoryContext = memories.isEmpty ? "" : "\n\nRelevant past memories about this user:\n" + memories.map { "- \($0)" }.joined(separator: "\n")
 
@@ -631,8 +613,8 @@ final class CompanionManager: ObservableObject {
                     }
                 )
                 
-                // Immediately unload the reasoning model
-                OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
+                // Await the unload so deepseek is fully out of RAM before the next call
+                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
 
                 guard !Task.isCancelled else { return }
 
@@ -708,12 +690,8 @@ final class CompanionManager: ObservableObject {
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 
-                // Step 8: Batch save to persistent Mem0 storage
-                pendingMemories.append((userTranscript: transcript, assistantResponse: spokenText))
-                if pendingMemories.count >= 5 {
-                    flushPendingMemories()
-                }
-
+                // Step 8: Batch save to persistent Mem0 storage — done AFTER TTS so both
+                // Ollama models are fully unloaded before Mem0's Python-side Ollama call runs.
                 // Play the response via TTS. Keep the spinner (processing state)
                 // until the audio actually starts playing, then switch to responding.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -726,14 +704,19 @@ final class CompanionManager: ObservableObject {
                         speakCreditsErrorFallback()
                     }
                 }
+
+                // Flush memories now that TTS has started and no Ollama model is loaded
+                pendingMemories.append((userTranscript: transcript, assistantResponse: spokenText))
+                if pendingMemories.count >= 5 {
+                    await flushPendingMemories()
+                }
             } catch is CancellationError {
                 // User spoke again — response was interrupted
-                // Try to unload models just in case
-                OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
+                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
             } catch {
                 print("⚠️ Companion response error: \(error)")
                 speakCreditsErrorFallback()
-                OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
+                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
             }
 
             if !Task.isCancelled {
@@ -1021,8 +1004,8 @@ final class CompanionManager: ObservableObject {
                     onTextChunk: { _ in }
                 )
                 
-                // Immediately unload the reasoning model
-                OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
+                // Await the unload so deepseek is fully out of RAM before continuing
+                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
 
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
 
@@ -1055,16 +1038,17 @@ final class CompanionManager: ObservableObject {
                 print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
             } catch {
                 print("⚠️ Onboarding demo error: \(error)")
-                OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
+                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
             }
         }
     }
     
     /// Flushes any pending memories to Mem0 immediately.
-    private func flushPendingMemories() {
+    private func flushPendingMemories() async {
         guard !pendingMemories.isEmpty else { return }
         print("🧠 Flushing \(pendingMemories.count) pending memories to Mem0...")
-        Mem0Client.shared.addConversationsBatch(exchanges: pendingMemories)
+        let memoriesToFlush = pendingMemories
         pendingMemories.removeAll()
+        await Mem0Client.shared.addConversationsBatch(exchanges: memoriesToFlush)
     }
 }

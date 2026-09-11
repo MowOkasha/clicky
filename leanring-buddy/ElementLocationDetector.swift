@@ -80,8 +80,8 @@ class ElementLocationDetector {
                 temperature: 0.0
             )
 
-            // Immediately unload the vision model to free RAM/VRAM
-            OllamaModelMemoryManager.shared.unloadModel(visionModel)
+            // Await the unload so the vision model is fully out of RAM before returning
+            await OllamaModelMemoryManager.shared.unloadModel(visionModel)
 
             return parseNormalisedCoordinateFromResponse(
                 responseText: responseText,
@@ -90,7 +90,7 @@ class ElementLocationDetector {
             )
         } catch {
             print("⚠️ ElementLocationDetector: vision model call failed: \(error.localizedDescription)")
-            OllamaModelMemoryManager.shared.unloadModel(visionModel)
+            await OllamaModelMemoryManager.shared.unloadModel(visionModel)
             return nil
         }
     }

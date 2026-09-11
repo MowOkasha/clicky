@@ -160,3 +160,14 @@ CLAUDE.md                # Full architecture doc (agents read this)
 PRs welcome. If you're using Claude Code, it already knows the codebase — just tell it what you want to build and point it at `CLAUDE.md`.
 
 Got feedback? DM me on X [@farzatv](https://x.com/farzatv).
+
+
+how to run:
+
+1: ollama serve
+2:ollama pull qwen2.5vl:7b
+ollama pull deepseek-coder-v2:lite
+ollama pull nomic-embed-text
+3: cd into memory-server
+uv pip install ollama -e .
+uv run python server.py

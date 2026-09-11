@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: memory-server
+Version: 0.1.0
+Summary: Mem0 sidecar server for Clicky
+Requires-Python: >=3.10
+Requires-Dist: fastapi>=0.100.0
+Requires-Dist: uvicorn>=0.23.0
+Requires-Dist: mem0ai>=0.0.19
+Requires-Dist: qdrant-client>=1.7.0

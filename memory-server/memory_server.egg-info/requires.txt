@@ -1,0 +1,4 @@
+fastapi>=0.100.0
+uvicorn>=0.23.0
+mem0ai>=0.0.19
+qdrant-client>=1.7.0

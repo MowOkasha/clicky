@@ -39,38 +39,39 @@ class Mem0Client {
         return false
     }
     
-    /// Adds a batch of conversational exchanges to Mem0.
-    func addConversationsBatch(exchanges: [(userTranscript: String, assistantResponse: String)]) {
+    /// Adds a batch of conversational exchanges to Mem0 and waits for the sidecar to finish.
+    /// Must be awaited — Mem0's /add handler calls Ollama internally to extract memories,
+    /// so holding the GlobalOllamaLock for the full HTTP round-trip prevents that Python-side
+    /// Ollama call from overlapping with Swift-side model loads.
+    func addConversationsBatch(exchanges: [(userTranscript: String, assistantResponse: String)]) async {
         guard !exchanges.isEmpty else { return }
         
-        Task {
-            await GlobalOllamaLock.shared.withLock {
-                var request = URLRequest(url: baseURL.appendingPathComponent("add"))
-                request.httpMethod = "POST"
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                
-                var messages: [[String: String]] = []
-                for exchange in exchanges {
-                    messages.append(["role": "user", "content": exchange.userTranscript])
-                    messages.append(["role": "assistant", "content": exchange.assistantResponse])
+        await GlobalOllamaLock.shared.withLock {
+            var request = URLRequest(url: baseURL.appendingPathComponent("add"))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            
+            var messages: [[String: String]] = []
+            for exchange in exchanges {
+                messages.append(["role": "user", "content": exchange.userTranscript])
+                messages.append(["role": "assistant", "content": exchange.assistantResponse])
+            }
+            
+            let body: [String: Any] = [
+                "user_id": "clicky_user",
+                "messages": messages
+            ]
+            
+            do {
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let (_, response) = try await session.data(for: request)
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                    print("⚠️ Mem0Client: Failed to add memory batch (status \(httpResponse.statusCode))")
+                } else {
+                    print("🧠 Mem0Client: Successfully added batch of \(exchanges.count) exchanges to memory.")
                 }
-                
-                let body: [String: Any] = [
-                    "user_id": "clicky_user",
-                    "messages": messages
-                ]
-                
-                do {
-                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                    let (_, response) = try await session.data(for: request)
-                    if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                        print("⚠️ Mem0Client: Failed to add memory batch (status \(httpResponse.statusCode))")
-                    } else {
-                        print("🧠 Mem0Client: Successfully added batch of \(exchanges.count) exchanges to memory.")
-                    }
-                } catch {
-                    print("⚠️ Mem0Client: Network error adding memory batch: \(error)")
-                }
+            } catch {
+                print("⚠️ Mem0Client: Network error adding memory batch: \(error)")
             }
         }
     }

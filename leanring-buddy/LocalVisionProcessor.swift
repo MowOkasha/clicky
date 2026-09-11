@@ -16,51 +16,52 @@ class LocalVisionProcessor {
     private let visionModel = "qwen2.5vl:7b"
     
     private let systemPrompt = """
-    You are a screen analysis assistant. You are given screenshots of a user's computer screen(s) and their spoken request.
-    Your job is to provide a highly detailed, structured text description of everything visible on the screen that is relevant to the user's request.
-    
-    Format your response exactly as follows:
-    Screen Description:
-    - App: [App name/Window title]
-    - Important Text/Code: [Summarize any visible text, code, or terminal output]
-    - Visible Elements: [List buttons, menus, icons, or UI elements relevant to the request]
-    - Element Locations: [If the user is asking to click or find something, describe its approximate location, e.g., 'top-right corner', 'left sidebar']
-    
-    WARNING: Do NOT invent, guess, or hallucinate any text or elements. If an element or text is not clearly visible on the screen, do not mention it under any circumstances. You must be strictly factual and literal.
-    
-    Do NOT answer the user's question. ONLY describe the screen content.
+    You are a screen-reading assistant. Your ONLY job is to describe exactly what you see on the user's screen(s) — literally, precisely, and completely.
+
+    Rules:
+    - Transcribe ALL visible text VERBATIM. Do not paraphrase, summarize, or omit any text you can read.
+    - Describe the layout and visual structure in plain language (e.g. "There is a code editor open, the file is named Foo.swift, and the cursor is on line 42").
+    - Name the application and window title if visible.
+    - For EVERY button, icon, folder, file, menu item, tab, or interactive element you see, describe it AND include its approximate pixel coordinates in the format: [x, y] where (0,0) is the top-left corner of the screenshot, x increases rightward, and y increases downward. Example: "There is a folder icon labeled 'Projects' at [450, 320]."
+    - If there are multiple screens, describe each one separately.
+    - Do NOT answer the user's question. ONLY describe what you see.
+    - Do NOT invent, hallucinate, or guess any content. If you cannot clearly read a piece of text, say so (e.g. "some small text that is too small to read clearly").
+    - Be thorough. It is better to over-describe than to miss something the user is asking about.
+    - Use plain, natural language — no bullet-point templates or headers.
     """
 
     init() {
         self.visionAPI = OllamaAPI(model: visionModel)
     }
 
-    /// Analyzes screenshots and returns a structured text description of the screen.
+    /// Analyzes screenshots and returns a detailed literal description of the screen.
     func analyzeScreenshots(
         images: [(data: Data, label: String)],
         userTranscript: String
     ) async throws -> String {
         print("👁️ LocalVisionProcessor: Starting vision analysis with \(visionModel)...")
-        
+
         do {
             let (visionText, duration) = try await visionAPI.analyzeImage(
                 images: images,
                 systemPrompt: systemPrompt,
                 conversationHistory: [],
-                userPrompt: "The user said: \"\(userTranscript)\". Describe the screen content relevant to this.",
-                temperature: 0.0
+                userPrompt: "The user asked: \"\(userTranscript)\". Describe everything visible on the screen in detail, paying particular attention to anything relevant to their question.",
+                temperature: 0.1
             )
             
             print("👁️ LocalVisionProcessor: Completed in \(String(format: "%.1f", duration))s")
             
-            // Immediately unload the vision model to free up RAM/VRAM for the reasoning model
-            OllamaModelMemoryManager.shared.unloadModel(visionModel)
+            // Immediately unload the vision model to free up RAM/VRAM for the reasoning model.
+            // Awaiting this ensures qwen2.5vl:7b is fully evicted before we return,
+            // so deepseek-coder-v2:lite never loads while the vision model is still in RAM.
+            await OllamaModelMemoryManager.shared.unloadModel(visionModel)
             
             return visionText
         } catch {
             print("⚠️ LocalVisionProcessor: Failed to analyze screenshots: \(error)")
-            // Make sure we try to unload even if it fails
-            OllamaModelMemoryManager.shared.unloadModel(visionModel)
+            // Make sure we try to unload even if analysis fails
+            await OllamaModelMemoryManager.shared.unloadModel(visionModel)
             throw error
         }
     }

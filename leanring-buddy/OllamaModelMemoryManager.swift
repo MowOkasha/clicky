@@ -25,11 +25,18 @@ class OllamaModelMemoryManager {
         self.session = URLSession(configuration: config)
     }
 
-    /// Unloads a specific model from Ollama's memory immediately.
-    func unloadModel(_ model: String) {
-        Task {
+    /// Unloads a specific model from Ollama's memory and waits for the unload to complete.
+    /// This MUST be awaited by callers before loading the next model.
+    ///
+    /// IMPORTANT: The network request runs inside a Task.detached block so it is NOT affected
+    /// by the parent task's cancellation state. Without this, calling unloadModel from a
+    /// CancellationError catch block (e.g. when the user speaks again mid-response) would cause
+    /// URLSession to throw CancellationError immediately without sending the keep_alive:0 request
+    /// to Ollama — leaving the model loaded in RAM and causing a 12GB+ spike on the next call.
+    func unloadModel(_ model: String) async {
+        await Task.detached(priority: .userInitiated) {
             await GlobalOllamaLock.shared.withLock {
-                var request = URLRequest(url: apiURL)
+                var request = URLRequest(url: self.apiURL)
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -41,8 +48,8 @@ class OllamaModelMemoryManager {
                 do {
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
                     print("🧹 OllamaModelMemoryManager: Unloading model '\(model)' from memory...")
-                    let (data, response) = try await session.data(for: request)
-                    
+                    let (data, response) = try await self.session.data(for: request)
+
                     if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
                         print("✅ OllamaModelMemoryManager: Successfully unloaded '\(model)'")
                     } else {
@@ -53,6 +60,6 @@ class OllamaModelMemoryManager {
                     print("⚠️ OllamaModelMemoryManager: Network error while unloading '\(model)': \(error.localizedDescription)")
                 }
             }
-        }
+        }.value
     }
 }

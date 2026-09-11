@@ -1,0 +1,7 @@
+pyproject.toml
+server.py
+memory_server.egg-info/PKG-INFO
+memory_server.egg-info/SOURCES.txt
+memory_server.egg-info/dependency_links.txt
+memory_server.egg-info/requires.txt
+memory_server.egg-info/top_level.txt
