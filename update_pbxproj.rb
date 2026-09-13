@@ -6,43 +6,49 @@ target = project.targets.first
 
 group = project.main_group.find_subpath('leanring-buddy', false)
 
+# Files deleted from disk — remove from Xcode project
 files_to_remove = [
-  'AssemblyAIStreamingTranscriptionProvider.swift',
-  'ClaudeAPI.swift',
-  'ClickyAnalytics.swift',
-  'ElevenLabsTTSClient.swift',
-  'OpenAIAPI.swift',
-  'OpenAIAudioTranscriptionProvider.swift'
-]
-
-files_to_add = [
-  'LocalTTSClient.swift',
   'LocalVisionProcessor.swift',
-  'Mem0Client.swift',
-  'OllamaAPI.swift',
-  'OllamaModelMemoryManager.swift'
+  'ElementLocationDetector.swift'
 ]
 
-# Remove files
+# New files added to disk — add to Xcode project
+files_to_add = [
+  'AgentToolDefinition.swift',
+  'AgentToolExecutor.swift',
+  'AgentLoop.swift'
+]
+
+# Remove deleted files
 files_to_remove.each do |file_name|
   file_ref = group.files.find { |f| f.path == file_name || f.name == file_name }
   if file_ref
-    puts "Removing #{file_name} from target"
+    puts "Removing #{file_name} from project"
     target.source_build_phase.remove_file_reference(file_ref)
     file_ref.remove_from_project
+  else
+    puts "#{file_name} not found in project (already removed?)"
   end
 end
 
 # Add new files
 files_to_add.each do |file_name|
-  # Ensure we don't add duplicates
-  unless group.files.any? { |f| f.path == file_name || f.name == file_name }
-    puts "Adding #{file_name} to target"
-    file_path = File.join(group.real_path, file_name)
-    file_ref = group.new_file(file_path)
-    target.add_file_references([file_ref])
+  # Skip if already in the project
+  if group.files.any? { |f| f.path == file_name || f.name == file_name }
+    puts "#{file_name} already in project — skipping"
+    next
   end
+
+  file_path = File.join(group.real_path, file_name)
+  unless File.exist?(file_path)
+    puts "WARNING: #{file_name} not found on disk at #{file_path}"
+    next
+  end
+
+  puts "Adding #{file_name} to project"
+  file_ref = group.new_reference(file_path)
+  target.source_build_phase.add_file_reference(file_ref)
 end
 
 project.save
-puts "Project saved successfully."
+puts "Project saved successfully"

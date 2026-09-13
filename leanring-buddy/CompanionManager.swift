@@ -76,8 +76,15 @@ final class CompanionManager: ObservableObject {
         return LocalTTSClient()
     }()
 
-    private lazy var localVisionProcessor: LocalVisionProcessor = {
-        return LocalVisionProcessor()
+    /// Tool executor for the agent loop — handles open_app, run_terminal_command, etc.
+    private lazy var agentToolExecutor: AgentToolExecutor = {
+        return AgentToolExecutor()
+    }()
+
+    /// The agentic loop orchestrator — runs think → act → observe until the model
+    /// produces a final text response or the iteration limit is reached.
+    private lazy var agentLoop: AgentLoop = {
+        return AgentLoop(ollamaAPI: ollamaAPI, toolExecutor: agentToolExecutor, maxIterations: 10)
     }()
 
     /// Conversation history so Claude remembers prior exchanges within a session.
@@ -110,8 +117,9 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    /// The reasoning model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "deepseek-coder-v2:lite"
+    /// The model used for all vision, reasoning, and tool calling. Persisted to UserDefaults.
+    /// Default is qwen3.5:9b-q5 — a single multimodal model replacing the previous two-model pipeline.
+    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "qwen3.5:9b-q5"
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
@@ -551,88 +559,74 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - AI Response Pipeline
 
-    /// Captures a screenshot, sends it along with the transcript to Claude,
-    /// and plays the response aloud via ElevenLabs TTS. The cursor stays in
-    /// the spinner/processing state until TTS audio begins playing.
-    /// Claude's response may include a [POINT:x,y:label] tag which triggers
-    /// the buddy to fly to that element on screen.
+    /// Captures screenshots, then runs the full agentic loop:
+    ///   1. qwen3.5:9b-q5 receives the screenshots + transcript + memories + all tool definitions
+    ///   2. If the model calls tools -> execute them -> feed results back -> repeat (up to 10 times)
+    ///   3. Once the model produces a final text response -> TTS + pointing
+    ///
+    /// The single model handles vision, reasoning, and tool calling in one load.
     private func processUserTranscript(transcript: String) {
         currentResponseTask?.cancel()
         localTTSClient.stopPlayback()
 
         currentResponseTask = Task {
-            // Stay in processing (spinner) state — no streaming text displayed
             voiceState = .processing
 
             do {
-                let historyForAPI = conversationHistory.map { entry in
-                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                // Build conversation history in the flat role/content format for OllamaAPI
+                let flatConversationHistory: [(role: String, content: String)] = conversationHistory.flatMap { entry in
+                    [(role: "user", content: entry.userTranscript),
+                     (role: "assistant", content: entry.assistantResponse)]
                 }
 
                 // Step 1: Capture screenshots of all connected displays
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
                 guard !Task.isCancelled else { return }
 
-                // Build labeled image array so the vision model knows which screen is which
+                // Build labeled image array so the model knows which screen is which
                 let labeledImages = screenCaptures.map { capture in
                     let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
                     return (data: capture.imageData, label: capture.label + dimensionInfo)
                 }
 
-                // Step 2: Describe the screen via qwen2.5vl:7b, then unload it
-                // analyzeScreenshots awaits its own unloadModel call before returning,
-                // so qwen is fully out of RAM before deepseek loads in Step 4.
-                let visionContext = try await localVisionProcessor.analyzeScreenshots(
-                    images: labeledImages,
-                    userTranscript: transcript
-                )
-                guard !Task.isCancelled else { return }
-
-                // Step 3: Retrieve relevant memories (no model load — calls the Mem0 sidecar only)
+                // Step 2: Retrieve relevant memories from Mem0 (no model load -- calls the sidecar only)
                 let memories = await Mem0Client.shared.searchRelevantMemories(forQuery: transcript)
-                let memoryContext = memories.isEmpty ? "" : "\n\nRelevant past memories about this user:\n" + memories.map { "- \($0)" }.joined(separator: "\n")
+                let memoryContext = memories.isEmpty ? "" : "\n\nRelevant memories about this user:\n" + memories.map { "- \($0)" }.joined(separator: "\n")
 
-                // Step 4: Reasoning via deepseek-coder-v2:lite
-                // Build the enriched prompt combining vision + memory + user intent
-                let enrichedPrompt = """
-                User's visual context:
-                \(visionContext)
-                \(memoryContext)
-                
-                User's request:
-                \(transcript)
-                """
-
-                let (fullResponseText, _) = try await ollamaAPI.analyzeImageStreaming(
-                    images: [], // Images already processed by vision model
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
-                    conversationHistory: historyForAPI,
-                    userPrompt: enrichedPrompt,
+                // Step 3: Run the agentic loop.
+                // qwen3.5:9b-q5 is a unified vision-language model -- screenshots are
+                // passed directly as images so it sees the screen in the same call
+                // where it reasons and decides whether to call tools.
+                let agentResult = try await agentLoop.run(
+                    systemPrompt: Self.companionVoiceResponseSystemPrompt + memoryContext,
+                    initialImages: labeledImages,
+                    conversationHistory: flatConversationHistory,
+                    userPrompt: transcript,
                     onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
+                        // Spinner stays until TTS plays -- no streaming text display during tool loops
+                    },
+                    onToolCallStarted: { toolName, _ in
+                        print("Executing tool: \(toolName)")
                     }
                 )
-                
-                // Await the unload so deepseek is fully out of RAM before the next call
+
+                // Unload the model now that the agent loop has finished
                 await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
 
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+                // Parse the [POINT:...] tag from the model's final response
+                let parseResult = Self.parsePointingCoordinates(from: agentResult.finalResponseText)
                 let spokenText = parseResult.spokenText
 
-                // Handle element pointing if Claude returned coordinates.
-                // Switch to idle BEFORE setting the location so the triangle
-                // becomes visible and can fly to the target. Without this, the
-                // spinner hides the triangle and the flight animation is invisible.
+                // Switch to idle before setting the pointing location so the
+                // triangle becomes visible and can start its flight animation.
                 let hasPointCoordinate = parseResult.coordinate != nil
                 if hasPointCoordinate {
                     voiceState = .idle
                 }
 
-                // Pick the screen capture matching Claude's screen number,
-                // falling back to the cursor screen if not specified.
+                // Pick the screen capture matching the model's screen number
                 let targetScreenCapture: CompanionScreenCapture? = {
                     if let screenNumber = parseResult.screenNumber,
                        screenNumber >= 1 && screenNumber <= screenCaptures.count {
@@ -643,27 +637,17 @@ final class CompanionManager: ObservableObject {
 
                 if let pointCoordinate = parseResult.coordinate,
                    let targetScreenCapture {
-                    // Claude's coordinates are in the screenshot's pixel space
-                    // (top-left origin, e.g. 1280x831). Scale to the display's
-                    // point space (e.g. 1512x982), then convert to AppKit global coords.
                     let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
                     let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
                     let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
                     let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
                     let displayFrame = targetScreenCapture.displayFrame
 
-                    // Clamp to screenshot coordinate space
                     let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
                     let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-
-                    // Scale from screenshot pixels to display points
                     let displayLocalX = clampedX * (displayWidth / screenshotWidth)
                     let displayLocalY = clampedY * (displayHeight / screenshotHeight)
-
-                    // Convert from top-left origin (screenshot) to bottom-left origin (AppKit)
                     let appKitY = displayHeight - displayLocalY
-
-                    // Convert display-local coords to global screen coords
                     let globalLocation = CGPoint(
                         x: displayLocalX + displayFrame.origin.x,
                         y: appKitY + displayFrame.origin.y
@@ -671,13 +655,12 @@ final class CompanionManager: ObservableObject {
 
                     detectedElementScreenLocation = globalLocation
                     detectedElementDisplayFrame = displayFrame
-                    print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
+                    print("Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) -> \"\(parseResult.elementLabel ?? "element")\"")
                 } else {
-                    print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
+                    print("Element pointing: \(parseResult.elementLabel ?? "no element")")
                 }
 
-                // Save this exchange to conversation history (with the point tag
-                // stripped so it doesn't confuse future context)
+                // Save this exchange to in-session conversation history
                 conversationHistory.append((
                     userTranscript: transcript,
                     assistantResponse: spokenText
@@ -688,33 +671,29 @@ final class CompanionManager: ObservableObject {
                     conversationHistory.removeFirst(conversationHistory.count - 10)
                 }
 
-                print("🧠 Conversation history: \(conversationHistory.count) exchanges")
+                print("Conversation history: \(conversationHistory.count) exchanges, \(agentResult.executedToolCalls.count) tool call(s) this turn")
 
-                // Step 8: Batch save to persistent Mem0 storage — done AFTER TTS so both
-                // Ollama models are fully unloaded before Mem0's Python-side Ollama call runs.
-                // Play the response via TTS. Keep the spinner (processing state)
-                // until the audio actually starts playing, then switch to responding.
+                // Speak the response. Keep the spinner until TTS audio actually begins.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     do {
                         try await localTTSClient.speakText(spokenText)
-                        // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
                     } catch {
-                        print("⚠️ Local TTS error: \(error)")
+                        print("Local TTS error: \(error)")
                         speakCreditsErrorFallback()
                     }
                 }
 
-                // Flush memories now that TTS has started and no Ollama model is loaded
+                // Flush memories to Mem0 after TTS starts and the model is fully unloaded
                 pendingMemories.append((userTranscript: transcript, assistantResponse: spokenText))
                 if pendingMemories.count >= 5 {
                     await flushPendingMemories()
                 }
             } catch is CancellationError {
-                // User spoke again — response was interrupted
+                // User spoke again -- response was interrupted
                 await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
             } catch {
-                print("⚠️ Companion response error: \(error)")
+                print("Companion response error: \(error)")
                 speakCreditsErrorFallback()
                 await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
             }
@@ -725,6 +704,8 @@ final class CompanionManager: ObservableObject {
             }
         }
     }
+
+
 
     /// If the cursor is in transient mode (user toggled "Show Clicky" off),
     /// waits for TTS playback and any pointing animation to finish, then
@@ -960,57 +941,42 @@ final class CompanionManager: ObservableObject {
     the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. origin (0,0) is top-left. x increases rightward, y increases downward.
     """
 
-    /// Captures a screenshot and asks Claude to find something interesting to
-    /// point at, then triggers the buddy's flight animation. Used during
-    /// onboarding to demo the pointing feature while the intro video plays.
+    /// Captures a screenshot and asks the single qwen3.5:9b-q5 model to find
+    /// something interesting to point at. Used during onboarding to demo the
+    /// pointing feature while the intro video plays.
     func performOnboardingDemoInteraction() {
-        // Don't interrupt an active voice response
         guard voiceState == .idle || voiceState == .responding else { return }
 
         Task {
             do {
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
 
-                // Only send the cursor screen so Claude can't pick something
-                // on a different monitor that we can't point at.
+                // Only use the cursor screen so the model picks something visible to the user
                 guard let cursorScreenCapture = screenCaptures.first(where: { $0.isCursorScreen }) else {
-                    print("🎯 Onboarding demo: no cursor screen found")
+                    print("Onboarding demo: no cursor screen found")
                     return
                 }
 
                 let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
                 let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
 
-                // Step 1: Extract vision context via qwen2.5vl:7b
-                let userPrompt = "look around my screen and find something interesting to point at"
-                let visionContext = try await localVisionProcessor.analyzeScreenshots(
-                    images: labeledImages,
-                    userTranscript: userPrompt
-                )
-                
-                let enrichedPrompt = """
-                User's visual context (from screen analysis):
-                \(visionContext)
-                
-                User's request:
-                \(userPrompt)
-                """
-
-                // Step 2: Reasoning via deepseek-coder-v2:lite
-                let (fullResponseText, _) = try await ollamaAPI.analyzeImageStreaming(
-                    images: [], // Images already processed by vision model
+                // Send screenshot directly to qwen3.5:9b-q5 (unified vision + reasoning)
+                // No separate vision model call needed -- the single model sees the screen.
+                let agentResult = try await agentLoop.run(
                     systemPrompt: Self.onboardingDemoSystemPrompt,
-                    userPrompt: enrichedPrompt,
-                    onTextChunk: { _ in }
+                    initialImages: labeledImages,
+                    conversationHistory: [],
+                    userPrompt: "look around my screen and find something interesting to point at",
+                    onTextChunk: { _ in },
+                    onToolCallStarted: nil
                 )
-                
-                // Await the unload so deepseek is fully out of RAM before continuing
+
                 await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
 
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+                let parseResult = Self.parsePointingCoordinates(from: agentResult.finalResponseText)
 
                 guard let pointCoordinate = parseResult.coordinate else {
-                    print("🎯 Onboarding demo: no element to point at")
+                    print("Onboarding demo: no element to point at")
                     return
                 }
 
@@ -1030,14 +996,12 @@ final class CompanionManager: ObservableObject {
                     y: appKitY + displayFrame.origin.y
                 )
 
-                // Set custom bubble text so the pointing animation uses Claude's
-                // comment instead of a random phrase
                 detectedElementBubbleText = parseResult.spokenText
                 detectedElementScreenLocation = globalLocation
                 detectedElementDisplayFrame = displayFrame
-                print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
+                print("Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" -- \"\(parseResult.spokenText)\"")
             } catch {
-                print("⚠️ Onboarding demo error: \(error)")
+                print("Onboarding demo error: \(error)")
                 await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
             }
         }

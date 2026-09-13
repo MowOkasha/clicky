@@ -2,24 +2,43 @@
 //  OllamaAPI.swift
 //  leanring-buddy
 //
-//  Ollama API Implementation with streaming support
+//  Ollama API client supporting streaming chat with native tool calling.
+//  Images (screenshots) are sent as base64 alongside the user prompt so
+//  the single vision-language model (qwen3.5:9b-q5) can see the screen.
 //
 
 import Foundation
 
-/// Ollama API helper with streaming for progressive text display.
+/// A tool_call returned by Ollama when the model wants to invoke a tool.
+struct OllamaToolCall: Sendable {
+    let toolCallID: String
+    let functionName: String
+    let arguments: [String: Any]
+}
+
+/// Result of one streaming chat call — either the model produced text,
+/// or it returned tool calls that the agent loop must execute before
+/// the model can produce its final response.
+enum OllamaStreamResult: Sendable {
+    /// The model generated a final text response (no tool calls).
+    case textResponse(text: String, duration: TimeInterval)
+    /// The model wants to call one or more tools before continuing.
+    case toolCallsRequested(toolCalls: [OllamaToolCall], duration: TimeInterval)
+}
+
+/// Ollama API helper with streaming and native tool calling support.
 class OllamaAPI {
     private let apiURL: URL
     var model: String
     private let session: URLSession
 
-    init(model: String = "deepseek-coder-v2:lite") {
+    init(model: String = "qwen3.5:9b-q5") {
         self.apiURL = URL(string: "http://localhost:11434/api/chat")!
         self.model = model
 
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 120
-        config.timeoutIntervalForResource = 300
+        config.timeoutIntervalForRequest = 300  // Long timeout for multi-step agentic tasks
+        config.timeoutIntervalForResource = 600
         config.waitsForConnectivity = true
         config.urlCache = nil
         config.httpCookieStorage = nil
@@ -29,218 +48,183 @@ class OllamaAPI {
     private func makeAPIRequest() -> URLRequest {
         var request = URLRequest(url: apiURL)
         request.httpMethod = "POST"
-        request.timeoutInterval = 120
+        request.timeoutInterval = 300
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
     }
 
-    /// Send a request to Ollama with streaming.
-    /// Calls `onTextChunk` on the main actor each time new text arrives so the UI updates progressively.
-    /// Returns the full accumulated text and total duration when the stream completes.
-    func analyzeImageStreaming(
-        images: [(data: Data, label: String)],
+    // MARK: - Streaming Chat (with optional tool calling)
+
+    /// Sends a chat request to Ollama with optional tool definitions and screenshot images.
+    /// 
+    /// If `tools` is non-empty, Ollama may return `tool_calls` instead of text.
+    /// The caller (AgentLoop) is responsible for executing tool calls and sending
+    /// results back for the next iteration.
+    ///
+    /// `onTextChunk` is called on the main actor as streaming text arrives.
+    /// Returns either a final text response or a list of tool calls to execute.
+    func chat(
+        images: [(data: Data, label: String)] = [],
         systemPrompt: String,
-        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
+        conversationHistory: [(role: String, content: String)] = [],
         userPrompt: String,
+        tools: [[String: Any]] = [],
         temperature: Double? = nil,
         onTextChunk: @MainActor @Sendable (String) -> Void
-    ) async throws -> (text: String, duration: TimeInterval) {
+    ) async throws -> OllamaStreamResult {
         return try await GlobalOllamaLock.shared.withLock {
             let startTime = Date()
 
-        var request = makeAPIRequest()
+            var request = makeAPIRequest()
 
-        // Build messages array
-        var messages: [[String: Any]] = []
+            // Build the messages array
+            var messages: [[String: Any]] = []
 
-        if !systemPrompt.isEmpty {
-            messages.append(["role": "system", "content": systemPrompt])
-        }
-
-        for (userPlaceholder, assistantResponse) in conversationHistory {
-            messages.append(["role": "user", "content": userPlaceholder])
-            messages.append(["role": "assistant", "content": assistantResponse])
-        }
-
-        // Build current message with images + prompt
-        var contentText = ""
-        var base64Images: [String] = []
-        
-        if !images.isEmpty {
-            var imageContext = "Here are the images provided:\n"
-            for (index, image) in images.enumerated() {
-                imageContext += "Image \(index + 1) label: \(image.label)\n"
-                base64Images.append(image.data.base64EncodedString())
+            if !systemPrompt.isEmpty {
+                messages.append(["role": "system", "content": systemPrompt])
             }
-            contentText += imageContext + "\n"
-        }
-        
-        contentText += userPrompt
 
-        var userMessage: [String: Any] = [
-            "role": "user",
-            "content": contentText
-        ]
-        
-        if !base64Images.isEmpty {
-            userMessage["images"] = base64Images
-        }
-        
-        messages.append(userMessage)
+            // Inject conversation history (role is already "user", "assistant", or "tool")
+            for entry in conversationHistory {
+                messages.append(["role": entry.role, "content": entry.content])
+            }
 
-        var body: [String: Any] = [
-            "model": model,
-            "stream": true,
-            "messages": messages
-        ]
-        
-        if let temp = temperature {
-            body["options"] = ["temperature": temp]
-        }
+            // Build the current user message, attaching screenshots as base64
+            var contentText = ""
+            var base64Images: [String] = []
 
-        let bodyData = try JSONSerialization.data(withJSONObject: body)
-        request.httpBody = bodyData
-        let payloadMB = Double(bodyData.count) / 1_048_576.0
-        print("🌐 Ollama streaming request: \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s)")
+            if !images.isEmpty {
+                var imageContext = "Screenshots of the user's screen:\n"
+                for (index, image) in images.enumerated() {
+                    imageContext += "Screen \(index + 1): \(image.label)\n"
+                    base64Images.append(image.data.base64EncodedString())
+                }
+                contentText += imageContext + "\n"
+            }
 
-        let (byteStream, response) = try await session.bytes(for: request)
+            contentText += userPrompt
 
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(
-                domain: "OllamaAPI",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP response"]
-            )
-        }
+            var userMessage: [String: Any] = [
+                "role": "user",
+                "content": contentText
+            ]
 
-        guard (200...299).contains(httpResponse.statusCode) else {
-            var errorBodyChunks: [String] = []
+            if !base64Images.isEmpty {
+                userMessage["images"] = base64Images
+            }
+
+            messages.append(userMessage)
+
+            // Assemble the request body
+            var body: [String: Any] = [
+                "model": model,
+                "stream": true,
+                "messages": messages
+            ]
+
+            if !tools.isEmpty {
+                body["tools"] = tools
+            }
+
+            if let temp = temperature {
+                body["options"] = ["temperature": temp]
+            }
+
+            let bodyData = try JSONSerialization.data(withJSONObject: body)
+            request.httpBody = bodyData
+            let payloadMB = Double(bodyData.count) / 1_048_576.0
+            print("🌐 Ollama chat: \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s), \(tools.count) tool(s)")
+
+            let (byteStream, response) = try await session.bytes(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw NSError(
+                    domain: "OllamaAPI",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP response"]
+                )
+            }
+
+            guard (200...299).contains(httpResponse.statusCode) else {
+                var errorBodyChunks: [String] = []
+                for try await line in byteStream.lines {
+                    errorBodyChunks.append(line)
+                }
+                let errorBody = errorBodyChunks.joined(separator: "\n")
+                throw NSError(
+                    domain: "OllamaAPI",
+                    code: httpResponse.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "Ollama error (\(httpResponse.statusCode)): \(errorBody)"]
+                )
+            }
+
+            var accumulatedResponseText = ""
+            // Ollama accumulates tool_calls across chunks — we collect the full
+            // tool call list from the final "done: true" message.
+            var collectedToolCalls: [[String: Any]] = []
+
             for try await line in byteStream.lines {
-                errorBodyChunks.append(line)
-            }
-            let errorBody = errorBodyChunks.joined(separator: "\n")
-            throw NSError(
-                domain: "OllamaAPI",
-                code: httpResponse.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "API Error (\(httpResponse.statusCode)): \(errorBody)"]
-            )
-        }
+                guard !line.isEmpty else { continue }
 
-        var accumulatedResponseText = ""
+                guard let jsonData = line.data(using: .utf8),
+                      let eventPayload = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                    continue
+                }
 
-        for try await line in byteStream.lines {
-            guard !line.isEmpty else { continue }
-            
-            guard let jsonData = line.data(using: .utf8),
-                  let eventPayload = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                continue
-            }
-            
-            if let isDone = eventPayload["done"] as? Bool, isDone {
-                break
-            }
+                let isDone = (eventPayload["done"] as? Bool) == true
 
-            if let message = eventPayload["message"] as? [String: Any],
-               let textChunk = message["content"] as? String {
-                accumulatedResponseText += textChunk
-                let currentAccumulatedText = accumulatedResponseText
-                await onTextChunk(currentAccumulatedText)
+                if let message = eventPayload["message"] as? [String: Any] {
+                    // Accumulate streamed text content
+                    if let textChunk = message["content"] as? String, !textChunk.isEmpty {
+                        accumulatedResponseText += textChunk
+                        let snapshot = accumulatedResponseText
+                        await onTextChunk(snapshot)
+                    }
+
+                    // Collect tool_calls from the final message
+                    if isDone, let toolCalls = message["tool_calls"] as? [[String: Any]] {
+                        collectedToolCalls = toolCalls
+                    }
+                }
+
+                if isDone { break }
             }
-        }
 
             let duration = Date().timeIntervalSince(startTime)
-            return (text: accumulatedResponseText, duration: duration)
-        }
-    }
 
-    /// Non-streaming fallback for validation requests where we don't need progressive display.
-    func analyzeImage(
-        images: [(data: Data, label: String)],
-        systemPrompt: String,
-        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
-        userPrompt: String,
-        temperature: Double? = nil
-    ) async throws -> (text: String, duration: TimeInterval) {
-        return try await GlobalOllamaLock.shared.withLock {
-            let startTime = Date()
+            // If the model returned tool calls, parse them for the agent loop
+            if !collectedToolCalls.isEmpty {
+                let parsedToolCalls = collectedToolCalls.compactMap { rawToolCall -> OllamaToolCall? in
+                    guard let function_ = rawToolCall["function"] as? [String: Any],
+                          let name = function_["name"] as? String else { return nil }
 
-        var request = makeAPIRequest()
+                    // Arguments may be a JSON string or already a dictionary
+                    let arguments: [String: Any]
+                    if let argsDict = function_["arguments"] as? [String: Any] {
+                        arguments = argsDict
+                    } else if let argsString = function_["arguments"] as? String,
+                              let argsData = argsString.data(using: .utf8),
+                              let argsDict = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any] {
+                        arguments = argsDict
+                    } else {
+                        arguments = [:]
+                    }
 
-        var messages: [[String: Any]] = []
+                    // Ollama does not always provide an ID — generate one if missing
+                    let toolCallID = rawToolCall["id"] as? String ?? UUID().uuidString
 
-        if !systemPrompt.isEmpty {
-            messages.append(["role": "system", "content": systemPrompt])
-        }
+                    return OllamaToolCall(
+                        toolCallID: toolCallID,
+                        functionName: name,
+                        arguments: arguments
+                    )
+                }
 
-        for (userPlaceholder, assistantResponse) in conversationHistory {
-            messages.append(["role": "user", "content": userPlaceholder])
-            messages.append(["role": "assistant", "content": assistantResponse])
-        }
-
-        var contentText = ""
-        var base64Images: [String] = []
-        
-        if !images.isEmpty {
-            var imageContext = "Here are the images provided:\n"
-            for (index, image) in images.enumerated() {
-                imageContext += "Image \(index + 1) label: \(image.label)\n"
-                base64Images.append(image.data.base64EncodedString())
+                print("🔧 Ollama returned \(parsedToolCalls.count) tool call(s): \(parsedToolCalls.map { $0.functionName }.joined(separator: ", "))")
+                return .toolCallsRequested(toolCalls: parsedToolCalls, duration: duration)
             }
-            contentText += imageContext + "\n"
-        }
-        
-        contentText += userPrompt
 
-        var userMessage: [String: Any] = [
-            "role": "user",
-            "content": contentText
-        ]
-        
-        if !base64Images.isEmpty {
-            userMessage["images"] = base64Images
-        }
-        
-        messages.append(userMessage)
-
-        var body: [String: Any] = [
-            "model": model,
-            "stream": false,
-            "messages": messages
-        ]
-        
-        if let temp = temperature {
-            body["options"] = ["temperature": temp]
-        }
-
-        let bodyData = try JSONSerialization.data(withJSONObject: body)
-        request.httpBody = bodyData
-        let payloadMB = Double(bodyData.count) / 1_048_576.0
-        print("🌐 Ollama request: \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s)")
-
-        let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            let responseString = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NSError(
-                domain: "OllamaAPI",
-                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                userInfo: [NSLocalizedDescriptionKey: "API Error: \(responseString)"]
-            )
-        }
-
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        guard let message = json?["message"] as? [String: Any],
-              let text = message["content"] as? String else {
-            throw NSError(
-                domain: "OllamaAPI",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid response format"]
-            )
-        }
-
-            let duration = Date().timeIntervalSince(startTime)
-            return (text: text, duration: duration)
+            return .textResponse(text: accumulatedResponseText, duration: duration)
         }
     }
 }
