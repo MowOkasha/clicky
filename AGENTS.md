@@ -14,31 +14,32 @@ All AI inference runs locally via Ollama — no external API keys or network cal
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **Vision Model**: `qwen2.5vl:7b` via local Ollama — screen OCR, UI element mapping, bounding-box detection
-- **Reasoning Model**: `deepseek-coder-v2:lite` via local Ollama — response generation, tool calling, instruction following
+- **Unified Model**: `qwen3.5:9b-q5` (Q5_K_M GGUF, ~6.6GB) via local Ollama — handles vision (screenshot analysis), reasoning (response generation), and native tool calling in a single model load
 - **Speech-to-Text**: Apple SFSpeechRecognizer (on-device, zero-latency push-to-talk)
 - **Text-to-Speech**: AVSpeechSynthesizer (on-device, zero-latency)
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
 - **Element Pointing**: The reasoning model embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
+- **Agentic Tool Calling**: Native Ollama `tools` API with a think→act→observe loop (up to 10 iterations). Tools: open_app, run_terminal_command, open_url, search_web, read_webpage, type_text, take_screenshot, list_running_apps, read_clipboard, write_clipboard.
 - **Memory**: Persistent conversation memory via a local Mem0 FastAPI sidecar (`memory-server/`).
 - **Concurrency**: `@MainActor` isolation, async/await throughout
-- **Model Memory Management**: Models are loaded on-demand and immediately unloaded via `keep_alive: 0` after each use. Vision model unloads before reasoning model loads and vice versa. Both models are unloaded when idle (hotkey not held).
+- **Model Memory Management**: Model is loaded on-demand and immediately unloaded via `keep_alive: 0` after each use. Model is unloaded when idle (hotkey not held).
 
 ### Local AI Pipeline (per interaction)
 
 ```text
 User speaks (ctrl+option held)
   → Apple SFSpeechRecognizer → transcript
-  → deepseek-coder-v2:lite (MoE) check if vision needed? → UNLOAD
-  → If YES:
-      → ScreenCaptureKit → screenshots
-      → qwen2.5vl:7b (Ollama) → screen description → UNLOAD
+  → ScreenCaptureKit → screenshots
   → Mem0 sidecar → retrieve relevant past memories
-  → deepseek-coder-v2:lite (Ollama) → response text (with optional [POINT:...]) → UNLOAD
-  → Mem0 sidecar → save this exchange
+  → qwen3.5:9b-q5 (Ollama /api/chat with tools + images)
+      Agent Loop (up to 10 iterations):
+        → model returns tool_calls? → AgentToolExecutor runs tool → feed result back → repeat
+        → model returns text response? → done
+  → UNLOAD qwen3.5:9b-q5
   → AVSpeechSynthesizer → spoken audio
   → Cursor overlay → animate to pointed element (if any)
+  → Mem0 sidecar → save this exchange
 ```
 
 ### Key Architecture Decisions
@@ -49,7 +50,9 @@ User speaks (ctrl+option held)
 
 **Global Push-To-Talk Shortcut**: Background push-to-talk uses a listen-only `CGEvent` tap instead of an AppKit global monitor so modifier-based shortcuts like `ctrl + option` are detected more reliably while the app is running in the background.
 
-**Model Load/Unload Strategy**: Because `qwen2.5vl:7b` and `deepseek-coder-v2:lite` are too large to hold in RAM simultaneously, they are loaded sequentially. `OllamaModelMemoryManager` sends a `keep_alive: 0` request after each inference call to force Ollama to release VRAM/RAM immediately. This is critical on memory-constrained machines.
+**Single Model for Vision + Reasoning + Tools**: `qwen3.5:9b-q5` is a unified multimodal model that receives screenshots as base64 images alongside the user transcript in a single Ollama `/api/chat` call. This eliminates the two-model sequential load/unload cycle and halves the RAM churn compared to the previous architecture.
+
+**Agentic Tool Loop**: `AgentLoop` implements the ReAct-style think→act→observe pattern. It sends the model's tool_calls to `AgentToolExecutor`, feeds results back as `role: "tool"` messages, and loops until the model produces a plain text response or 10 iterations are reached. The model stays loaded throughout the loop and is unloaded immediately after.
 
 **Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
 
@@ -60,7 +63,7 @@ User speaks (ctrl+option held)
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1010 | Central state machine. Owns dictation, shortcut monitoring, screen capture, local AI pipeline, TTS, memory, and overlay management. Coordinates the full push-to-talk → screenshot → vision → memory → reasoning → TTS → pointing pipeline. |
+| `CompanionManager.swift` | ~920 | Central state machine. Owns dictation, shortcut monitoring, screen capture, agentic AI pipeline, TTS, memory, and overlay management. Coordinates the full push-to-talk → screenshot → agent loop → TTS → pointing pipeline. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
 | `CompanionPanelView.swift` | ~700 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
@@ -71,12 +74,13 @@ User speaks (ctrl+option held)
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | On-device transcription provider backed by Apple's SFSpeechRecognizer. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
-| `OllamaAPI.swift` | ~233 | Local Ollama API client with NDJSON streaming and non-streaming modes. Sends images as base64. Used by both `LocalVisionProcessor` and `CompanionManager`. |
+| `OllamaAPI.swift` | ~220 | Local Ollama API client. Streaming chat with native tool calling support — sends screenshots as base64 images, passes tool definitions to Ollama, parses `tool_calls` from the streamed response. |
 | `OllamaModelMemoryManager.swift` | ~60 | Sends `keep_alive: 0` requests to Ollama to force immediate model unload after inference, freeing RAM/VRAM. |
-| `LocalVisionProcessor.swift` | ~65 | Runs screenshots through `qwen2.5vl:7b` to generate a structured text description of the screen. Unloads the model immediately after each call. |
+| `AgentToolDefinition.swift` | ~200 | JSON schema definitions for all 10 agentic tools. Converts to Ollama's tool format for the API request. |
+| `AgentToolExecutor.swift` | ~310 | Executes agentic tools by name. Implements open_app, run_terminal_command, open_url, search_web, read_webpage, type_text, take_screenshot, list_running_apps, read_clipboard, write_clipboard using NSWorkspace, Process/zsh, URLSession, NSPasteboard, and ScreenCaptureKit. |
+| `AgentLoop.swift` | ~160 | The agentic think→act→observe orchestrator. Calls the model, parses tool_calls, executes tools via AgentToolExecutor, feeds results back as "tool" role messages, and loops until the model produces a final text response or 10 iterations are reached. |
 | `LocalTTSClient.swift` | ~80 | AVSpeechSynthesizer wrapper. Speaks text on-device. Exposes `isPlaying` for transient cursor scheduling. |
 | `Mem0Client.swift` | ~100 | Swift HTTP client for the local Mem0 memory sidecar. Retrieves relevant past memories before inference and saves new exchanges after. |
-| `ElementLocationDetector.swift` | ~165 | Uses `qwen2.5vl:7b` via Ollama to locate UI elements in screenshots. Returns normalised (0–1) coordinates that are scaled to display-local AppKit coords by the caller. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
@@ -90,9 +94,9 @@ cd memory-server
 pip install -e .
 python server.py
 
-# Ensure Ollama is running with required models pulled
-ollama pull qwen2.5vl:7b
-ollama pull deepseek-coder-v2:lite
+# Ensure Ollama is running with the unified model
+# (qwen3.5:9b-q5 was created from the Q5_K_M GGUF via a custom Modelfile)
+ollama list  # verify qwen3.5:9b-q5 is present
 
 # Open in Xcode
 open leanring-buddy.xcodeproj
