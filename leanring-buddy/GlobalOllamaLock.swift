@@ -42,12 +42,19 @@ actor GlobalOllamaLock {
     }
     
     /// Executes the given async closure while holding the lock.
+    /// Release is synchronous via assumeIsolated — the old `defer { Task { ... } }`
+    /// pattern spawned a fire-and-forget Task that could run out of order, causing
+    /// double-release and letting two models load simultaneously (12GB RAM spike).
     func withLock<T>(_ operation: () async throws -> T) async rethrows -> T {
         await acquire()
         
+        // Because withLock is an actor method, the defer runs on this actor's
+        // executor. assumeIsolated lets us call release() synchronously without
+        // spawning a new Task, so the lock is guaranteed to be released before
+        // the next awaiting caller can proceed.
         defer {
-            Task {
-                await self.release()
+            self.assumeIsolated { isolatedSelf in
+                isolatedSelf.release()
             }
         }
         
