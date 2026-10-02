@@ -208,6 +208,20 @@ class AgentStateManager: ObservableObject {
 
     // MARK: - Prompt Construction (Stateless Model Invocations)
 
+    /// Scans the compressed action history in reverse to find the most recent technical error message.
+    func lastActualErrorMessage() -> String? {
+        for actionLine in compressedActionHistory.reversed() {
+            let lower = actionLine.lowercased()
+            if lower.contains("error:") || lower.contains("error ") || lower.contains("failed") || lower.contains("zsh:") || lower.contains("keyerror") || lower.contains("unmatched") || lower.contains("not found") || lower.contains("exception") {
+                if let arrowIndex = actionLine.range(of: " -> ") {
+                    return String(actionLine[arrowIndex.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                return actionLine
+            }
+        }
+        return nil
+    }
+
     /// Constructs a fresh user prompt for the Planner (qwen3.5-9b).
     ///
     /// - Parameter screenSummaryText: Summary of active application, window title, and visible elements.
@@ -217,8 +231,21 @@ class AgentStateManager: ObservableObject {
         // User goal
         sections.append("User Goal:\n\(userGoal)")
 
+        // Completed subgoals if replanning
+        let completedSubgoals = orderedSubgoals.filter { $0.status == .completed }
+        if !completedSubgoals.isEmpty {
+            let completedText = completedSubgoals.map { "- Subgoal #\($0.id): \($0.description) (COMPLETED)" }.joined(separator: "\n")
+            sections.append("Completed Subgoals (Do NOT repeat these, plan ONLY the remaining steps needed to finish the goal):\n\(completedText)")
+        }
+
         // Screen state summary
         sections.append("Current Screen State:\n\(screenSummaryText)")
+
+        // Recent action history if replanning
+        if !compressedActionHistory.isEmpty {
+            let recentText = compressedActionHistory.suffix(5).joined(separator: "\n")
+            sections.append("Recent Actions & Results:\n\(recentText)")
+        }
 
         // Retrieved RAG hints (past trajectories / UI maps)
         if !retrievedRAGHints.isEmpty {
@@ -228,7 +255,7 @@ class AgentStateManager: ObservableObject {
 
         // Failure note if this is a replan invocation
         if let failureReason = lastEscalationFailureReason {
-            sections.append("Failure Context (Previous attempt failed, adjust your plan accordingly):\n\(failureReason)")
+            sections.append("Failure Context (Previous attempt hit an issue, adjust your remaining plan accordingly):\n\(failureReason)")
         }
 
         return sections.joined(separator: "\n\n")

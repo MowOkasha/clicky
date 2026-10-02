@@ -114,19 +114,21 @@ Rules:
   it focused to open it or run shell commands. NEVER call escalate just because the target app is not
   frontmost or you see Terminal on screen. To open or switch to an app, simply call open_app("AppName")
   or run_terminal_command("open -a AppName").
-- RESEARCH & DOCUMENT CREATION (Pages, Word, TextEdit):
-  When asked to research or write content into Pages, Word, or another editor:
-  PREFER terminal commands to fetch data and write documents:
-  - Fetch summary: run_terminal_command("curl -s 'https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=Topic&format=json'") or search_web("Topic")
-  - Save as HTML and convert to docx:
-    run_terminal_command("cat << 'EOF' > ~/Desktop/Topic.html\\n...\\nEOF")
-    run_terminal_command("textutil -convert docx ~/Desktop/Topic.html -output ~/Desktop/Topic.docx")
-    run_terminal_command("open -a Pages ~/Desktop/Topic.docx")
-  - Or create directly in Pages via AppleScript:
-    run_terminal_command("osascript -e 'tell application \"Pages\" to make new document with properties {body text:\"...\"}'")
-  Do NOT click around web browsers or rely on GUI copy/paste when terminal/AppleScript commands can do it directly.
-- ESCALATE IS A LAST RESORT: NEVER call escalate on your first attempt at a subgoal. You must attempt
-  concrete actions first (such as open_app, run_terminal_command, click, etc.).
+- RESEARCH & DOCUMENT CREATION (Pages, Word, TextEdit, Safari):
+  1. If user asks to find/open in Safari, open it: run_terminal_command("open -a Safari 'https://en.wikipedia.org/wiki/Topic'")
+  2. NEVER manually echo or re-type article text into terminal commands. ALWAYS pipe command output directly into files!
+     Working Wikipedia fetch on macOS:
+     run_terminal_command("curl -sL 'https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&titles=Topic_Name&format=json' | python3 -c \"import sys,json; p=json.load(sys.stdin)['query']['pages']; print(next(iter(p.values()))['extract'])\" > /tmp/topic_raw.txt")
+     (Note: Always use next(iter(p.values()))['extract'] in python because Wikipedia keys pages by numeric ID. Never use grep -P on macOS.)
+  3. Summarize /tmp/topic_raw.txt into /tmp/summary.txt via python:
+     run_terminal_command("python3 -c \"import sys; text=open('/tmp/topic_raw.txt').read()[:4000]; paragraphs=[p.strip() for p in text.split('\\n') if len(p.strip()) > 50][:4]; open('/tmp/summary.txt','w').write('\\n\\n'.join(paragraphs))\"")
+  4. Create & populate Pages document via AppleScript:
+     run_terminal_command("osascript -e 'set txt to read POSIX file \"/tmp/summary.txt\" as «class utf8»' -e 'tell application \"Pages\"' -e 'activate' -e 'set doc to make new document' -e 'set body text of doc to txt' -e 'end tell'")
+     (Or convert via textutil: textutil -convert docx /tmp/summary.txt -output ~/Desktop/Summary.docx && open -a Pages ~/Desktop/Summary.docx)
+  5. Check file exists and is non-empty before calling done(): run_terminal_command("[ -s /tmp/summary.txt ] && echo OK")
+- DO NOT ESCALATE FOR ACTIONS YOU CAN DO YOURSELF: You have full access to run_terminal_command, open_app, and write_clipboard.
+  If you need to run a command (like textutil, python, curl, osascript) or open an app, execute it directly! NEVER call escalate to run commands.
+- ESCALATE IS A LAST RESORT: Only call escalate if an external roadblock truly prevents achieving the plan.
 - NEVER output `{"needs_plan": true}` during execution. If an action fails twice or you need replanning,
   call `escalate(reason: "...")`.
 - Never call wait consecutively. If a target element or file is not visible, use
@@ -236,12 +238,12 @@ no extra commentary.
                 OMLXChatMessage(role: .user, text: userPromptText, base64ImageData: base64Images)
             ]
 
-            // 3. Invoke resident actor model qwen3.5-9b
+            // 3. Invoke resident actor model qwen3.5-9b (token ceiling raised to prevent cut-off commands)
             let modelResponse = try await omlxClient.sendChatCompletionRequest(
                 model: OMLXClient.actorModelAlias,
                 messages: messages,
                 temperature: 0.0,
-                maxTokens: 200,
+                maxTokens: 1024,
                 enableThinking: false
             )
 
@@ -262,7 +264,7 @@ no extra commentary.
                         model: OMLXClient.actorModelAlias,
                         messages: reminderMessages,
                         temperature: 0.1,
-                        maxTokens: 150,
+                        maxTokens: 512,
                         enableThinking: false
                     ) {
                         if let recoveredCall = parseActorToolCall(from: retryResponse) {
@@ -297,6 +299,44 @@ no extra commentary.
 
             // 5. Check special termination/escalation tools before executor
             if validToolCall.toolName == "done" || validToolCall.toolName == "subgoal_complete" {
+                // Verify result if subgoal or goal involves writing a file or summary
+                let activeDesc = activeSubgoal.description.lowercased()
+                let isFileCreationGoal = activeDesc.contains("save") || activeDesc.contains("write") || activeDesc.contains("document") || activeDesc.contains(".txt") || activeDesc.contains(".pages") || activeDesc.contains(".docx") || activeDesc.contains("summary")
+
+                if isFileCreationGoal {
+                    var targetFilePath: String?
+                    let pathPattern = #"(/[a-zA-Z0-9_\-\./~]+\.(txt|pages|docx|html|json|pdf))"#
+                    if let regex = try? NSRegularExpression(pattern: pathPattern, options: []) {
+                        for historyLine in stateManager.compressedActionHistory.reversed() {
+                            let nsRange = NSRange(historyLine.startIndex..<historyLine.endIndex, in: historyLine)
+                            if let match = regex.firstMatch(in: historyLine, options: [], range: nsRange),
+                               let range = Range(match.range(at: 1), in: historyLine) {
+                                targetFilePath = String(historyLine[range])
+                                break
+                            }
+                        }
+                    }
+
+                    if let rawPath = targetFilePath {
+                        let resolvedPath = (rawPath as NSString).expandingTildeInPath
+                        var isDir: ObjCBool = false
+                        if FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDir) && !isDir.boolValue {
+                            if let attrs = try? FileManager.default.attributesOfItem(atPath: resolvedPath),
+                               let size = attrs[.size] as? Int64, size < 50 {
+                                print("⚠️ AgentActorLoop: Verification failed: Target file '\(rawPath)' is only \(size) bytes. Rejecting premature done.")
+                                let errorMsg = "Verification failed: Target file '\(rawPath)' is empty or only \(size) bytes. Write the actual content to the file before marking done."
+                                _ = stateManager.recordActionExecution(
+                                    actionSummary: "done() [REJECTED]",
+                                    resultSummary: errorMsg,
+                                    isActionSuccessful: false
+                                )
+                                onStepCompleted?("done", errorMsg)
+                                continue
+                            }
+                        }
+                    }
+                }
+
                 stateManager.completeCurrentActiveSubgoal()
                 onStepCompleted?("done", "Subgoal marked done")
                 lastExecutedCommand = nil
@@ -323,6 +363,20 @@ no extra commentary.
                     }
                 }
 
+                // Intercept premature escalate when the model has tools to do it directly (textutil, command, python, curl, osascript)
+                let selfExecutableKeywords = ["textutil", "curl", "python", "open_app", "command", "osascript", "applescript", "convert", "script"]
+                if selfExecutableKeywords.contains(where: { lowerReason.contains($0) }) {
+                    print("🛡️ AgentActorLoop: Intercepting misuse of escalate('\(reason)'). Reminding actor to execute directly.")
+                    let guidance = "Error: Do not call escalate to run commands or tools. You have full access to run_terminal_command, open_app, and write_clipboard. Execute the action directly."
+                    _ = stateManager.recordActionExecution(
+                        actionSummary: "escalate(\(reason.prefix(40))) [INTERCEPTED]",
+                        resultSummary: guidance,
+                        isActionSuccessful: false
+                    )
+                    onStepCompleted?("escalate", guidance)
+                    continue
+                }
+
                 stateManager.recordExplicitActorEscalation(reason: reason)
                 onStepCompleted?("escalate", reason)
 
@@ -335,17 +389,18 @@ no extra commentary.
 
             // 6. Block repeated identical failing commands
             if validToolCall.toolName == "run_terminal_command",
-               let cmd = (validToolCall.arguments["command"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               lastCommandFailed && lastExecutedCommand == cmd {
-                print("🛡️ AgentActorLoop: Blocking repeated identical failing command: \(cmd)")
-                let blockedMessage = "Error: That exact command '\(cmd)' failed on the previous step (\(lastCommandError)). Do not repeat identical failed commands. Try an alternative command or tool."
-                _ = stateManager.recordActionExecution(
-                    actionSummary: "run_terminal_command(\(cmd)) [BLOCKED REPEAT]",
-                    resultSummary: blockedMessage,
-                    isActionSuccessful: false
-                )
-                onStepCompleted?("run_terminal_command", blockedMessage)
-                continue
+               let cmd = (validToolCall.arguments["command"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                if lastCommandFailed && lastExecutedCommand == cmd {
+                    print("🛡️ AgentActorLoop: Blocking repeated identical failing command: \(cmd)")
+                    let blockedMessage = "Error: That exact command failed on the previous step (\(lastCommandError.prefix(120))). Do not repeat identical failed commands. Change your command, pipe to a file, or use a python script."
+                    _ = stateManager.recordActionExecution(
+                        actionSummary: "run_terminal_command(\(cmd.prefix(40))...) [BLOCKED REPEAT]",
+                        resultSummary: blockedMessage,
+                        isActionSuccessful: false
+                    )
+                    onStepCompleted?("run_terminal_command", blockedMessage)
+                    continue
+                }
             }
 
             // 7. Execute tool via AgentToolExecutor
@@ -539,7 +594,13 @@ no extra commentary.
             return ParsedActorToolCall(toolName: toolName, arguments: arguments, rawText: rawText)
         }
         
-        let trimmedText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        var cleanText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanText.hasPrefix("```") {
+            let lines = cleanText.components(separatedBy: "\n")
+            let strippedLines = lines.dropFirst().dropLast()
+            cleanText = strippedLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let trimmedText = cleanText
         
         // 2. Check for JSON object in content
         if trimmedText.hasPrefix("{") && trimmedText.hasSuffix("}") {
@@ -548,9 +609,20 @@ no extra commentary.
                     let reason = (json["reason"] as? String) ?? "Model requested replanning"
                     return ParsedActorToolCall(toolName: "escalate", arguments: ["reason": reason], rawText: trimmedText)
                 }
-                let name = (json["name"] as? String) ?? (json["tool"] as? String) ?? (json["function"] as? String) ?? ""
-                let args = (json["arguments"] as? [String: Any]) ?? (json["parameters"] as? [String: Any]) ?? json
-                let normalizedName = normalizeToolName(name)
+                let rawName = (json["name"] as? String) ?? (json["tool"] as? String) ?? (json["function"] as? String) ?? ""
+                var args = (json["arguments"] as? [String: Any]) ?? (json["parameters"] as? [String: Any]) ?? [:]
+
+                // If args is empty and rawName contains parentheses, extract arguments from inside rawName
+                if args.isEmpty && rawName.contains("(") && rawName.hasSuffix(")") {
+                    if let openParen = rawName.firstIndex(of: "("), let closeParen = rawName.lastIndex(of: ")") {
+                        let inside = String(rawName[rawName.index(after: openParen)..<closeParen])
+                        let normalized = normalizeToolName(rawName)
+                        args = parseFunctionCallArguments(toolName: normalized, rawArgumentsString: inside)
+                        return ParsedActorToolCall(toolName: normalized, arguments: args, rawText: trimmedText)
+                    }
+                }
+
+                let normalizedName = normalizeToolName(rawName)
                 if !normalizedName.isEmpty {
                     return ParsedActorToolCall(toolName: normalizedName, arguments: args, rawText: trimmedText)
                 }
@@ -643,7 +715,11 @@ no extra commentary.
                 let dropCount = 4
                 commandString = String(commandString.dropFirst(dropCount)).trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            arguments["command"] = cleanArgumentToken(commandString)
+            if (commandString.hasPrefix("\"") && commandString.hasSuffix("\"")) ||
+               (commandString.hasPrefix("'") && commandString.hasSuffix("'")) {
+                commandString = String(commandString.dropFirst().dropLast())
+            }
+            arguments["command"] = commandString
 
         case "open_url", "read_webpage":
             var urlString = trimmed
@@ -865,25 +941,27 @@ Speak conversationally: all lowercase, no markdown formatting, no bullet points,
             ?? stateManager.lastEscalationFailureReason
             ?? "Could not complete all planned actions"
         let activeSubgoalDescription = stateManager.currentActiveSubgoal()?.description ?? "the current step"
+        let realLastError = stateManager.lastActualErrorMessage() ?? failureReason
 
         // Build brief action history snippet
-        let recentActions = stateManager.compressedActionHistory.suffix(3).joined(separator: "\n")
+        let recentActions = stateManager.compressedActionHistory.suffix(4).joined(separator: "\n")
 
         let explanationPrompt = """
 User goal: "\(stateManager.userGoal)"
 Task stopped on subgoal: "\(activeSubgoalDescription)"
-Failure reason: "\(failureReason)"
+Last recorded technical error: "\(realLastError)"
 Recent actions:
 \(recentActions)
 
-In ONE friendly spoken sentence, explain to the user why the task could not be completed or what stopped you.
+In ONE friendly spoken sentence, explain to the user why the task could not be completed based STRICTLY on the last recorded technical error: "\(realLastError)".
+CRITICAL: Do NOT invent causes. Do NOT claim the page does not exist or the API was empty unless the technical error literally says so.
 All lowercase, no markdown, no emojis.
 """
 
         let messages: [OMLXChatMessage] = [
             OMLXChatMessage(
                 role: .system,
-                text: "You are Clicky, a friendly voice companion on macOS. Explain why a task failed concisely in one spoken sentence. All lowercase, no markdown, no emojis."
+                text: "You are Clicky, a friendly voice companion on macOS. Explain why a task failed concisely in one spoken sentence based strictly on the recorded error. All lowercase, no markdown, no emojis."
             ),
             OMLXChatMessage(role: .user, text: explanationPrompt)
         ]
@@ -893,7 +971,7 @@ All lowercase, no markdown, no emojis.
                 model: OMLXClient.actorModelAlias,
                 messages: messages,
                 temperature: 0.1,
-                maxTokens: 80,
+                maxTokens: 100,
                 enableThinking: false
             )
             let cleaned = stripThinkingTags(from: response.contentText).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -904,15 +982,18 @@ All lowercase, no markdown, no emojis.
             print("⚠️ AgentActorLoop: Failed to synthesize failure explanation: \(error)")
         }
 
-        // Fallback
-        return "i wasn't able to complete that because \(failureReason.lowercased())."
+        // Clean factual fallback
+        return "i ran into an issue while \(activeSubgoalDescription.lowercased()): \(realLastError.prefix(100).lowercased())."
     }
 
     // MARK: - Normalization & Goal Satisfaction Helpers
 
     /// Normalizes tool aliases (e.g. subgoal_complete, skip) to canonical tool names.
     private func normalizeToolName(_ name: String) -> String {
-        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var clean = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let parenIndex = clean.firstIndex(of: "(") {
+            clean = String(clean[..<parenIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         switch clean {
         case "subgoal_complete", "mark_done", "skip", "finish_subgoal":
             return "done"

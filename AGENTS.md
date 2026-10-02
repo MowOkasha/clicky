@@ -74,9 +74,9 @@ User speaks (ctrl+option held)
 | `CompanionManager.swift` | ~1310 | Central state machine. Coordinates push-to-talk, intelligent triage, perception, RAG lookup, planner, actor loop, TTS, element pointing, spoken tool synthesis, and task dock. |
 | `OMLXClient.swift` | ~475 | HTTP client wrapper for oMLX OpenAI-compatible endpoints (`localhost:8000/v1`) and admin API. Configured for single resident 9B model + embedder with no swapping. |
 | `PerceptionManager.swift` | ~380 | UI perception layer. Reads the `AXUIElement` hierarchy for active windows and falls back to ScreenCaptureKit screenshots only when permitted and necessary. |
-| `AgentStateManager.swift` | ~290 | External task state manager. Owns task goal, subgoals, compressed 1-line action history, stall detection, and failure counters outside model context. |
-| `AgentPlanner.swift` | ~190 | Planner orchestrator using `qwen3.5-9b`. Houses verbatim planner prompt, turns goal + screen state + RAG hints into ordered subgoals JSON with terminal-first preference. |
-| `AgentActorLoop.swift` | ~980 | Execution loop using resident `qwen3.5-9b`. Evaluates first-turn triage, executes atomic tool calls with terminal-first preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
+| `AgentStateManager.swift` | ~320 | External task state manager. Owns task goal, subgoals, compressed 1-line action history, stall detection, and failure counters outside model context. |
+| `AgentPlanner.swift` | ~180 | Planner orchestrator using `qwen3.5-9b`. Houses verbatim planner prompt, turns goal + screen state + RAG hints into ordered subgoals JSON with terminal-first preference. |
+| `AgentActorLoop.swift` | ~1060 | Execution loop using resident `qwen3.5-9b`. Evaluates first-turn triage, executes atomic tool calls with terminal-first preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
 | `AgentToolExecutor.swift` | ~555 | Executes agent tools: click (AXUIElement with CGEvent fallback), type, scroll, point, open_app, wait, done, escalate, shell commands via zsh with PATH resolution, and clipboard. |
 | `LocalVectorStore.swift` | ~270 | Pure Swift in-process SQLite vector store with Accelerate `vDSP` cosine similarity for trajectories and per-app UI maps. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |

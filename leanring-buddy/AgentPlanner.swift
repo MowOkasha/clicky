@@ -26,50 +26,41 @@ Do NOT think or output <think> tags. Output ONLY the JSON response immediately.
 
 You will receive:
 - The user's goal, in their own words.
-- A summary of the current screen state (active app, window title, and
-  either a list of visible UI elements or a note that a screenshot is
-  attached).
-- Optionally, relevant past trajectories or a cached UI map for the
-  current app, retrieved from memory. Treat these as hints, not ground
-  truth — the live screen state always wins if they conflict.
-- Optionally, a note that a previous attempt failed, with the reason.
+- A summary of the current screen state.
+- Optionally, relevant past trajectories or UI hints.
+- Optionally, context on completed subgoals and previous failure reasons when replanning.
 
 Rules:
-- Prefer terminal commands over GUI navigation: If the user's goal involves
-  checking for files, opening files, inspecting directories (like ~/Desktop, ~/Downloads,
-  ~/Documents), searching disk, checking running processes, git status, or system
-  information, plan subgoals that use terminal commands (e.g. "run terminal command: ls ~/Desktop",
-  "open file via terminal: open ~/Desktop/position.pages", "read file: cat ~/Desktop/notes.txt")
-  rather than opening Finder, clicking around the desktop, or taking screenshots.
+1. RESPECT USER-SPECIFIED APPLICATIONS & BROWSERS:
+   If the user specifically asks to open, find, or use an application (e.g. "open on Safari", "find that on Safari", "paste into Pages", "write in Notes"):
+   You MUST include opening and using that application!
+   - For Safari: e.g. "open Safari to page: run_terminal_command(\"open -a Safari 'https://en.wikipedia.org/wiki/Topic_Name'\")"
+   - For Pages: e.g. "create Pages document: run_terminal_command(\"osascript -e 'tell application \\\"Pages\\\" to make new document with properties {body text:\\\"...\\\"}'\")" or open a generated document in Pages.
 
-- Research & Document Creation (Pages, Word, TextEdit):
-  When asked to research a topic and put it into Pages, Word, or another document editor:
-  NEVER plan fragile multi-step GUI web browsing, waiting for pages, clicking links, selecting text, and pasting into text areas.
-  Instead, plan concise terminal-first actions:
-  1. Fetch/compile research: use Wikipedia API via curl (e.g. curl -s 'https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=Topic_Name&format=json') or search_web or compile summary.
-  2. Save content to a document file: write HTML or Markdown, convert using macOS built-in textutil:
-     run terminal command: cat << 'EOF' > ~/Desktop/Topic_Name.html ... EOF
-     run terminal command: textutil -convert docx ~/Desktop/Topic_Name.html -output ~/Desktop/Topic_Name.docx
-  3. Open the document in Pages:
-     run terminal command: open -a Pages ~/Desktop/Topic_Name.docx
-     (Or use AppleScript: osascript -e 'tell application "Pages" to make new document with properties {body text:"..."}')
-  This completes the task cleanly in 3-4 reliable terminal steps without browser tabs, clipboard copy/paste, or clicking.
+2. PIPING TOOL OUTPUT STRAIGHT TO FILES (NEVER RETYPE LONG TEXT):
+   When fetching research or web data, NEVER plan subgoals where the model has to manually copy, echo, or retype article text into terminal commands.
+   ALWAYS pipe command output directly into a file:
+   - Wikipedia extraction (working macOS pattern):
+     curl -sL 'https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&titles=Topic_Name&format=json' | python3 -c "import sys,json; p=json.load(sys.stdin)['query']['pages']; print(next(iter(p.values()))['extract'])" > /tmp/topic_raw.txt
+     NOTE: Wikipedia API keys pages by numeric ID (e.g. '312905'). ALWAYS use next(iter(p.values()))['extract'] in python. NEVER access p['Topic_Name'] directly (causes KeyError).
+     NOTE: macOS grep is BSD grep and does NOT support -P. NEVER use grep -oP or grep -oE on raw JSON.
 
-- Opening / Switching Applications:
-  Use concrete single-step subgoals: e.g. "open application: open_app(\"Safari\")" or "open file via terminal: open ~/Desktop/file.pages".
-  Terminal commands and open_app execute independently in the background regardless of what app is frontmost. NEVER plan intermediate steps like "switch from Terminal to Safari" as separate escalations.
+3. SUMMARIZING & POPULATING PAGES DOCUMENTS:
+   For tasks requiring a summary put into Pages, Word, or TextEdit:
+   - Step 1 (if requested): Open Safari to the article URL so the user sees the page:
+     run terminal command: open -a Safari 'https://en.wikipedia.org/wiki/Topic_Name'
+   - Step 2: Fetch full text directly to /tmp/topic_raw.txt via curl and python.
+   - Step 3: Summarize /tmp/topic_raw.txt into /tmp/summary.txt using a clean python script:
+     python3 -c "import sys; text=open('/tmp/topic_raw.txt').read()[:4000]; paragraphs=[p.strip() for p in text.split('\n') if len(p.strip()) > 50][:4]; open('/tmp/summary.txt','w').write('\n\n'.join(paragraphs))"
+   - Step 4: Create new Pages document with the summary:
+     osascript -e 'set txt to read POSIX file "/tmp/summary.txt" as «class utf8»' -e 'tell application "Pages"' -e 'activate' -e 'set doc to make new document' -e 'set body text of doc to txt' -e 'end tell'
+     (Or convert via textutil: textutil -convert docx /tmp/summary.txt -output ~/Desktop/Summary.docx && open -a Pages ~/Desktop/Summary.docx)
+   - Step 5: Verify the summary exists and is non-empty: [ -s /tmp/summary.txt ].
 
-- Never suggest stopping or killing background terminal processes or pressing Ctrl+C in user terminal windows.
-- Each subgoal must be a single, concrete, verifiable outcome
-  (e.g. "open Pages", "attach the file named invoice.pdf",
-  "click Send") — never a vague instruction like "handle the email."
-- Order subgoals the way a careful human would actually perform the
-  task, including any necessary intermediate steps (opening menus,
-  waiting for windows to load) even if the user didn't mention them.
-- If you're replanning after a failure, don't just repeat the same
-  subgoal — adjust it based on the failure reason you were given.
-- Never invent UI elements you weren't told exist.
-- Output ONLY valid JSON, no prose, in this exact shape:
+4. GENERAL PLANNING:
+   - Prefer terminal commands over manual clicking for file operations (ls, open, cat, find).
+   - When replanning, plan ONLY the remaining subgoals needed to complete the user goal. Do not repeat completed subgoals.
+   - Output ONLY valid JSON, no prose, in this exact shape:
 
 {
   "subgoals": [
@@ -104,12 +95,12 @@ Rules:
             OMLXChatMessage(role: .user, text: userPrompt, base64ImageData: base64Images)
         ]
 
-        print("🧠 AgentPlanner: Invoking qwen3.5-9b planner (thinking disabled, maxTokens: 400)...")
+        print("🧠 AgentPlanner: Invoking qwen3.5-9b planner (thinking disabled, maxTokens: 500)...")
         let response = try await omlxClient.sendChatCompletionRequest(
             model: OMLXClient.plannerModelAlias,
             messages: messages,
             temperature: 0.1,
-            maxTokens: 400,
+            maxTokens: 500,
             enableThinking: false
         )
         print("🧠 AgentPlanner: Received response in \(String(format: "%.2f", response.requestDuration))s")
