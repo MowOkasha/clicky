@@ -48,16 +48,21 @@ class AgentLoop {
     ///   - conversationHistory: Prior turns in the conversation (user/assistant pairs).
     ///   - userPrompt: The current user message (transcript + vision context + memories).
     ///   - onTextChunk: Called on the main actor as the model streams its final response.
+    ///   - onTaskStarted: Optional callback when a multi-step task begins (before first tool execution).
     ///   - onToolCallStarted: Optional UI callback when a tool call begins (name, args).
+    ///   - onToolCallFinished: Optional UI callback when a tool call finishes (name, result).
     func run(
         systemPrompt: String,
         initialImages: [(data: Data, label: String)],
         conversationHistory: [(role: String, content: String)],
         userPrompt: String,
         onTextChunk: @MainActor @Sendable (String) -> Void,
-        onToolCallStarted: (@MainActor (String, [String: Any]) -> Void)? = nil
+        onTaskStarted: (@MainActor () -> Void)? = nil,
+        onToolCallStarted: (@MainActor (String, [String: Any]) -> Void)? = nil,
+        onToolCallFinished: (@MainActor (String, String) -> Void)? = nil
     ) async throws -> AgentLoopResult {
         let overallStartTime = Date()
+        var hasNotifiedTaskStarted = false
 
         // Mutable history that grows as we add tool calls and results
         var runningHistory = conversationHistory
@@ -119,6 +124,12 @@ class AgentLoop {
                 )
 
             case .toolCallsRequested(let toolCalls, _):
+                // Trigger onTaskStarted callback before the first tool executes
+                if !hasNotifiedTaskStarted {
+                    hasNotifiedTaskStarted = true
+                    onTaskStarted?()
+                }
+
                 // Execute each requested tool and collect results
                 var toolResultMessages: [(role: String, content: String)] = []
 
@@ -130,6 +141,9 @@ class AgentLoop {
                         toolName: toolCall.functionName,
                         arguments: toolCall.arguments
                     )
+
+                    // Notify the UI that the tool has completed execution
+                    onToolCallFinished?(toolCall.functionName, toolResult)
 
                     executedToolCalls.append((
                         toolName: toolCall.functionName,

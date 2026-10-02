@@ -5,100 +5,117 @@
 
 ## Overview
 
-macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via Apple's on-device SFSpeechRecognizer, and runs a two-stage local AI pipeline: a vision model analyzes the screenshot, then a reasoning model generates a response. The app speaks the reply via AVSpeechSynthesizer. A blue cursor overlay can fly to and point at UI elements the model references on any connected monitor.
+macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via Apple's on-device SFSpeechRecognizer, and executes tasks using a local multi-model agent architecture served by oMLX (`http://localhost:8000/v1`):
+- **Actor / Grounding**: `qwen3.5-4b` (pinned, resident)
+- **Planner**: `qwen3.5-9b` (on-demand, ~90s idle TTL)
+- **Embedder**: `qwen3-embedding-0.6b` (pinned, resident)
 
-All AI inference runs locally via Ollama — no external API keys or network calls required for core functionality.
+Task state lives entirely outside model context in an external state manager. Perception reads the macOS `AXUIElement` hierarchy first, falling back to multi-monitor screenshots only when the accessibility tree is insufficient. Past trajectories and UI maps are retrieved from a pure Swift in-process SQLite vector store using Apple's Accelerate framework. When executing a task, Clicky relocates to a task progress dock below the menu bar clock in the top-right corner, expanding on hover to reveal tool-by-tool progress. Spoken replies are delivered via AVSpeechSynthesizer with element pointing via the blue cursor overlay.
 
 ## Architecture
 
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **Unified Model**: `qwen3.5:9b-q5` (Q5_K_M GGUF, ~6.6GB) via local Ollama — handles vision (screenshot analysis), reasoning (response generation), and native tool calling in a single model load
+- **Model Server**: oMLX serving three models over an OpenAI-compatible API at `http://localhost:8000/v1`
+  - `qwen3.5-4b`: Pinned, resident actor/grounding model handling tool execution
+  - `qwen3.5-9b`: On-demand planner decomposing goals into verifiable subgoals and replanning on escalation
+  - `qwen3-embedding-0.6b`: Pinned, resident embedder for RAG retrieval
 - **Speech-to-Text**: Apple SFSpeechRecognizer (on-device, zero-latency push-to-talk)
 - **Text-to-Speech**: AVSpeechSynthesizer (on-device, zero-latency)
-- **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
-- **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
-- **Element Pointing**: The reasoning model embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
-- **Agentic Tool Calling**: Native Ollama `tools` API with a think→act→observe loop (up to 10 iterations). Tools: open_app, run_terminal_command, open_url, search_web, read_webpage, type_text, take_screenshot, list_running_apps, read_clipboard, write_clipboard.
-- **Memory**: Persistent conversation memory via a local Mem0 FastAPI sidecar (`memory-server/`).
+- **Perception Layer**: macOS Accessibility API (`AXUIElement`) inspection first; ScreenCaptureKit screenshot fallback only when AX tree is insufficient
+- **External State Management**: Task goal, planned subgoals, compressed action history, and failure counters live in `AgentStateManager` outside model context
+- **Minimal Local RAG**: In-process SQLite vector store (`LocalVectorStore`) storing trajectories and per-app UI maps with Accelerate `vDSP` cosine similarity
+- **Task Progress Dock**: During task execution, Clicky stations below the menu bar clock in the top-right screen corner; hovering expands live tool execution steps
+- **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap
+- **Element Pointing**: Blue cursor overlay navigates to UI elements via bezier curve animation and speech bubbles
+- **Tool Execution**: Accessibility actions (`kAXPressAction`, text values) with `CGEvent` mouse clicks and scroll fallback
 - **Concurrency**: `@MainActor` isolation, async/await throughout
-- **Model Memory Management**: Model is loaded on-demand and immediately unloaded via `keep_alive: 0` after each use. Model is unloaded when idle (hotkey not held).
 
 ### Local AI Pipeline (per interaction)
 
 ```text
 User speaks (ctrl+option held)
   → Apple SFSpeechRecognizer → transcript
-  → ScreenCaptureKit → screenshots
-  → Mem0 sidecar → retrieve relevant past memories
-  → qwen3.5:9b-q5 (Ollama /api/chat with tools + images)
-      Agent Loop (up to 10 iterations):
-        → model returns tool_calls? → AgentToolExecutor runs tool → feed result back → repeat
-        → model returns text response? → done
-  → UNLOAD qwen3.5:9b-q5
-  → AVSpeechSynthesizer → spoken audio
-  → Cursor overlay → animate to pointed element (if any)
-  → Mem0 sidecar → save this exchange
+  → Upfront spoken confirmation
+  → Blue cursor docks to top-right screen corner (below menu bar clock)
+  → PerceptionManager: inspects AXUIElement hierarchy (or captures fallback screenshots)
+  → LocalVectorStore: RAG lookup via qwen3-embedding-0.6b for past trajectories & app UI map
+  → AgentStateManager: initializes session with goal + RAG hints (state lives outside model)
+  → AgentPlanner: qwen3.5-9b decomposes goal into ordered subgoals
+  → AgentActorLoop (resident qwen3.5-4b):
+      For each subgoal:
+        → Capture fresh screen state (AX tree preferred)
+        → Reconstruct fresh prompt from AgentStateManager
+        → Model returns single tool call: click, type, scroll, point, open_app, wait, done, escalate
+        → AgentToolExecutor executes tool via AXUIElement or CGEvent
+        → AgentStateManager compresses result into 1 line, increments/resets failure count
+        → On 3 consecutive failures or explicit escalate → re-invoke AgentPlanner with failure context
+  → On success: LocalVectorStore saves completed trajectory
+  → Task dock dismisses, cursor returns to follow mouse
+  → AVSpeechSynthesizer speaks completion
 ```
 
 ### Key Architecture Decisions
 
-**Menu Bar Panel Pattern**: The companion panel uses `NSStatusItem` for the menu bar icon and a custom borderless `NSPanel` for the floating control panel. This gives full control over appearance (dark, rounded corners, custom shadow) and avoids the standard macOS menu/popover chrome. The panel is non-activating so it doesn't steal focus. A global event monitor auto-dismisses it on outside clicks.
+**State Lives Outside the Model**: Task state (goal, plan, step history, RAG hits) lives in Clicky's own app layer (`AgentStateManager`), not in either model's context. Every call to either model reconstructs the prompt fresh from that state. This makes it safe for oMLX to load and evict the 9B planner freely without forgetting context, paying only a short prefill cost on reload.
 
-**Cursor Overlay**: A full-screen transparent `NSPanel` hosts the blue cursor companion. It's non-activating, joins all Spaces, and never steals focus. The cursor position, response text, waveform, and pointing animations all render in this overlay via SwiftUI through `NSHostingView`.
+**Strict Mutual Exclusion of 4B and 9B**: On 16GB Apple Silicon Macs, running `qwen3.5-4b` and `qwen3.5-9b` simultaneously causes unified memory pressure and Metal OOM failures. Clicky enforces that at most one generative LLM is pinned/resident at any time: the 4B actor is pinned during idle and execution, swapped to the 9B planner only during planning/replanning passes (unpin 4B -> unload 4B -> pin 9B -> plan -> unpin 9B -> unload 9B -> pin 4B), while `qwen3-embed` remains permanently resident. First-turn triage is handled directly by the 4B actor.
 
-**Global Push-To-Talk Shortcut**: Background push-to-talk uses a listen-only `CGEvent` tap instead of an AppKit global monitor so modifier-based shortcuts like `ctrl + option` are detected more reliably while the app is running in the background.
+**Accessibility Tree First, Screenshot Fallback**: Rather than capturing multi-monitor screenshots for every step, Clicky traverses the active window's `AXUIElement` tree. This provides exact coordinates, labels, and roles with zero vision model latency. Screen capture is reserved solely as a fallback for non-accessible apps (games, custom canvases).
 
-**Single Model for Vision + Reasoning + Tools**: `qwen3.5:9b-q5` is a unified multimodal model that receives screenshots as base64 images alongside the user transcript in a single Ollama `/api/chat` call. This eliminates the two-model sequential load/unload cycle and halves the RAM churn compared to the previous architecture.
+**Three Models via oMLX**: A 4B resident model handles fast step-by-step tool grounding, a 9B model handles high-level planning and replanning on demand, and a 0.6B embedder powers instant local RAG lookups. Combined resident footprint stays well under 3GB, fitting comfortably on a 16GB Mac.
 
-**Agentic Tool Loop**: `AgentLoop` implements the ReAct-style think→act→observe pattern. It sends the model's tool_calls to `AgentToolExecutor`, feeds results back as `role: "tool"` messages, and loops until the model produces a plain text response or 10 iterations are reached. The model stays loaded throughout the loop and is unloaded immediately after.
+**Pure Swift In-Process RAG**: The local vector store runs directly in-process via macOS system SQLite (`libsqlite3`) and calculates cosine similarity using Apple's Accelerate framework (`vDSP`). No external Python sidecars or external vector databases required.
 
-**Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
-
-**Mem0 Memory Sidecar**: A local FastAPI server (`memory-server/server.py`) wraps the `mem0ai` Python library and persists conversation context across sessions using an embedded vector store. The Swift `Mem0Client` communicates with it over localhost.
+**Task Progress Dock (Top-Right Screen Corner)**: When an agent task begins, the blue cursor flies up to the top-right corner of the screen right below the macOS menu bar clock. It features a compact circular badge with a pulsing glow that expands on hover into a floating frosted glass card displaying live, tool-by-tool progress with checkmarks and active spinners.
 
 ## Key Files
 
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~920 | Central state machine. Owns dictation, shortcut monitoring, screen capture, agentic AI pipeline, TTS, memory, and overlay management. Coordinates the full push-to-talk → screenshot → agent loop → TTS → pointing pipeline. |
+| `CompanionManager.swift` | ~1310 | Central state machine. Coordinates push-to-talk, intelligent triage, perception, RAG lookup, planner, actor loop, TTS, element pointing, spoken tool synthesis, and task dock. |
+| `OMLXClient.swift` | ~505 | HTTP client wrapper for oMLX OpenAI-compatible endpoints (`localhost:8000/v1`) and admin API. Enforces single LLM residency, swapping between 4B and 9B. |
+| `PerceptionManager.swift` | ~380 | UI perception layer. Reads the `AXUIElement` hierarchy for active windows and falls back to ScreenCaptureKit screenshots only when permitted and necessary. |
+| `AgentStateManager.swift` | ~290 | External task state manager. Owns task goal, subgoals, compressed 1-line action history, stall detection, and failure counters outside model context. |
+| `AgentPlanner.swift` | ~190 | Planner orchestrator using `qwen3.5-9b`. Houses verbatim planner prompt, turns goal + screen state + RAG hints into ordered subgoals JSON with terminal-first preference. |
+| `AgentActorLoop.swift` | ~970 | Execution loop using resident `qwen3.5-4b`. Evaluates first-turn triage, executes atomic tool calls with terminal-first preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
+| `AgentToolExecutor.swift` | ~555 | Executes agent tools: click (AXUIElement with CGEvent fallback), type, scroll, point, open_app, wait, done, escalate, shell commands via zsh with PATH resolution, and clipboard. |
+| `LocalVectorStore.swift` | ~270 | Pure Swift in-process SQLite vector store with Accelerate `vDSP` cosine similarity for trajectories and per-app UI maps. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
 | `CompanionPanelView.swift` | ~700 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
-| `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
+| `OverlayWindow.swift` | ~925 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, dock flight, element pointing with bezier arcs, and multi-monitor coordinate mapping. |
+| `AgentTaskDockWindow.swift` | ~270 | Dedicated top-right floating task progress dock window and SwiftUI view. Shows compact pulsing badge below menu bar clock; expands on hover to display live tool execution steps. |
+| `AgentTaskProgressStep.swift` | ~100 | Data model representing individual tool execution steps with user-friendly formatting and completion status. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
 | `BuddyDictationManager.swift` | ~866 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
-| `BuddyTranscriptionProvider.swift` | ~39 | Protocol surface and provider factory for voice transcription backends. Factory always returns `AppleSpeechTranscriptionProvider`. |
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | On-device transcription provider backed by Apple's SFSpeechRecognizer. |
-| `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
-| `OllamaAPI.swift` | ~220 | Local Ollama API client. Streaming chat with native tool calling support — sends screenshots as base64 images, passes tool definitions to Ollama, parses `tool_calls` from the streamed response. |
-| `OllamaModelMemoryManager.swift` | ~60 | Sends `keep_alive: 0` requests to Ollama to force immediate model unload after inference, freeing RAM/VRAM. |
-| `AgentToolDefinition.swift` | ~200 | JSON schema definitions for all 10 agentic tools. Converts to Ollama's tool format for the API request. |
-| `AgentToolExecutor.swift` | ~310 | Executes agentic tools by name. Implements open_app, run_terminal_command, open_url, search_web, read_webpage, type_text, take_screenshot, list_running_apps, read_clipboard, write_clipboard using NSWorkspace, Process/zsh, URLSession, NSPasteboard, and ScreenCaptureKit. |
-| `AgentLoop.swift` | ~160 | The agentic think→act→observe orchestrator. Calls the model, parses tool_calls, executes tools via AgentToolExecutor, feeds results back as "tool" role messages, and loops until the model produces a final text response or 10 iterations are reached. |
 | `LocalTTSClient.swift` | ~80 | AVSpeechSynthesizer wrapper. Speaks text on-device. Exposes `isPlaying` for transient cursor scheduling. |
-| `Mem0Client.swift` | ~100 | Swift HTTP client for the local Mem0 memory sidecar. Retrieves relevant past memories before inference and saves new exchanges after. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
+| `DebugEventLogger.swift` | ~260 | Singleton terminal debug logger. Streams structured, emoji-prefixed, timestamped events to `~/Library/Logs/Clicky/debug.log` with in-place truncation and live synchronization. Run `tail -f ~/Library/Logs/Clicky/debug.log` to watch the full agent pipeline live. |
 | `memory-server/server.py` | ~80 | FastAPI sidecar that wraps `mem0ai` for persistent conversation memory. Exposes `/add`, `/search`, and `/reset` endpoints on localhost. |
 
 ## Build & Run
 
 ```bash
-# Start the Mem0 memory sidecar (in a separate terminal, keep running)
+# Terminal 1: Start Ollama
+ollama serve
+
+# Terminal 2: Pull and start the unified multimodal vision + reasoning model
+ollama run qwen2.5vl:7b
+ollama pull nomic-embed-text
+
+# Terminal 3: Start the Mem0 memory sidecar (in a separate terminal, keep running)
 cd memory-server
-pip install -e .
-python server.py
+uv pip install ollama -e .
+uv run python server.py
 
-# Ensure Ollama is running with the unified model
-# (qwen3.5:9b-q5 was created from the Q5_K_M GGUF via a custom Modelfile)
-ollama list  # verify qwen3.5:9b-q5 is present
-
-# Open in Xcode
+# Terminal 4: Open in Xcode
 open leanring-buddy.xcodeproj
 
 # Select the leanring-buddy scheme, set signing team, Cmd+R to build and run

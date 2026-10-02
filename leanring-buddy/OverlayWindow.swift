@@ -94,6 +94,8 @@ enum BuddyNavigationMode {
     case navigatingToTarget
     /// Buddy has arrived at the target and is pointing at it with a speech bubble
     case pointingAtTarget
+    /// Buddy is docked at the top-right corner during an agent task
+    case dockedAtTopRight
 }
 
 // SwiftUI view for the blue glowing cursor pointer.
@@ -308,7 +310,7 @@ struct BlueCursorView: View {
                 .rotationEffect(.degrees(triangleRotationDegrees))
                 .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
                 .scaleEffect(buddyFlightScale)
-                .opacity(buddyIsVisibleOnThisScreen && (companionManager.voiceState == .idle || companionManager.voiceState == .responding) ? cursorOpacity : 0)
+                .opacity(buddyIsVisibleOnThisScreen && (companionManager.voiceState == .idle || companionManager.voiceState == .responding || buddyNavigationMode == .navigatingToTarget) ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(
                     buddyNavigationMode == .followingCursor
@@ -331,7 +333,7 @@ struct BlueCursorView: View {
 
             // Blue spinner — shown while the AI is processing (transcription + Claude + waiting for TTS)
             BlueCursorSpinnerView()
-                .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .processing ? cursorOpacity : 0)
+                .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .processing && !companionManager.isAgentTaskRunning && buddyNavigationMode == .followingCursor ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
@@ -384,6 +386,9 @@ struct BlueCursorView: View {
 
             startNavigatingToElement(screenLocation: screenLocation)
         }
+        .onChange(of: companionManager.isAgentTaskRunning) { isRunning in
+            handleTaskRunningStateChanged(isRunning: isRunning)
+        }
     }
 
     /// Whether the buddy triangle should be visible on this screen.
@@ -400,9 +405,40 @@ struct BlueCursorView: View {
             if companionManager.detectedElementScreenLocation != nil {
                 return false
             }
+            // If an agent task is active, hide following cursor (dock window handles display)
+            if companionManager.isAgentTaskRunning {
+                return false
+            }
             return isCursorOnThisScreen
         case .navigatingToTarget, .pointingAtTarget:
             return true
+        case .dockedAtTopRight:
+            // Dock window renders the active indicator while docked
+            return false
+        }
+    }
+
+    private func handleTaskRunningStateChanged(isRunning: Bool) {
+        if isRunning {
+            guard isCursorOnThisScreen else { return }
+
+            let dockTarget = CGPoint(x: screenFrame.width - 34, y: 40)
+            buddyNavigationMode = .navigatingToTarget
+            isReturningToCursor = false
+
+            animateBezierFlightArc(to: dockTarget) {
+                self.buddyNavigationMode = .dockedAtTopRight
+                let currentScreen = NSScreen.screens.first(where: { $0.frame == self.screenFrame }) ?? NSScreen.main ?? NSScreen.screens[0]
+                self.companionManager.agentTaskDockWindowManager.showDock(
+                    onScreen: currentScreen,
+                    companionManager: self.companionManager
+                )
+            }
+        } else {
+            self.companionManager.agentTaskDockWindowManager.hideDock()
+            if buddyNavigationMode == .dockedAtTopRight {
+                startFlyingBackToCursor()
+            }
         }
     }
 

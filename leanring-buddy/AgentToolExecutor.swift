@@ -14,6 +14,14 @@ import ScreenCaptureKit
 @MainActor
 class AgentToolExecutor {
 
+    // MARK: - State & References
+
+    /// Active mapping of element IDs to live AXUIElement references for the current perception state.
+    var currentPerceptionLiveElementMap: [String: AXUIElement] = [:]
+
+    /// Optional reference to CompanionManager for triggering cursor pointing animations.
+    weak var companionManager: CompanionManager?
+
     // MARK: - Public Execution Entry Point
 
     /// Executes the named tool with the provided arguments and returns
@@ -24,8 +32,22 @@ class AgentToolExecutor {
         do {
             let result: String
             switch toolName {
+            case "click":
+                result = try await executeClick(arguments: arguments)
+            case "type", "type_text":
+                result = try await executeTypeText(arguments: arguments)
+            case "scroll":
+                result = try executeScroll(arguments: arguments)
+            case "point":
+                result = executePoint(arguments: arguments)
             case "open_app":
                 result = try await executeOpenApp(arguments: arguments)
+            case "wait":
+                result = try await executeWait(arguments: arguments)
+            case "done":
+                result = executeDone()
+            case "escalate":
+                result = executeEscalate(arguments: arguments)
             case "run_terminal_command":
                 result = try await executeRunTerminalCommand(arguments: arguments)
             case "open_url":
@@ -34,8 +56,6 @@ class AgentToolExecutor {
                 result = try await executeSearchWeb(arguments: arguments)
             case "read_webpage":
                 result = try await executeReadWebpage(arguments: arguments)
-            case "type_text":
-                result = try await executeTypeText(arguments: arguments)
             case "take_screenshot":
                 result = await executeTakeScreenshot()
             case "list_running_apps":
@@ -49,20 +69,165 @@ class AgentToolExecutor {
             }
 
             print("🔧 AgentToolExecutor: '\(toolName)' result: \(result.prefix(200))")
+            DebugEventLogger.shared.log(.toolExecution(
+                toolName: toolName,
+                argumentsSummary: formatArgumentsForDebugLog(arguments),
+                result: result
+            ))
             return result
         } catch {
             let errorMessage = "Error executing '\(toolName)': \(error.localizedDescription)"
             print("⚠️ AgentToolExecutor: \(errorMessage)")
+            DebugEventLogger.shared.log(.toolExecution(
+                toolName: toolName,
+                argumentsSummary: formatArgumentsForDebugLog(arguments),
+                result: errorMessage
+            ))
             return errorMessage
         }
     }
 
+    /// Formats a tool arguments dictionary into a clean `key: value` string for the debug log.
+    /// Uses simple string interpolation rather than NSDictionary description to avoid
+    /// the ugly `{key = val;}` format that shows up when values are Any-typed.
+    private func formatArgumentsForDebugLog(_ arguments: [String: Any]) -> String {
+        let pairs = arguments.map { key, value -> String in
+            let valueString: String
+            if let stringValue = value as? String {
+                valueString = "\"\(stringValue)\""
+            } else if let numberValue = value as? NSNumber {
+                valueString = numberValue.stringValue
+            } else if let dictValue = value as? [String: Any] {
+                // Recursively flatten nested dicts (e.g. model returns {args: {seconds: 2}})
+                valueString = "{\(formatArgumentsForDebugLog(dictValue))}"
+            } else {
+                valueString = "\(value)"
+            }
+            return "\(key): \(valueString)"
+        }
+        return pairs.sorted().joined(separator: ", ")
+    }
+
     // MARK: - Tool Implementations
+
+    /// Performs a click either on a named accessibility element or at screen coordinates.
+    private func executeClick(arguments: [String: Any]) async throws -> String {
+        // 1. Check if element_id is specified
+        if let elementID = arguments["element_id"] as? String ?? arguments["id"] as? String {
+            if let axElement = currentPerceptionLiveElementMap[elementID] {
+                // Try Accessibility API action first
+                let pressResult = AXUIElementPerformAction(axElement, kAXPressAction as CFString)
+                if pressResult == .success {
+                    return "Successfully clicked element \(elementID) via accessibility action"
+                }
+
+                // Fallback: Click center of element's frame using CGEvent
+                let frame = copyElementFrame(axElement: axElement)
+                if frame.width > 0 && frame.height > 0 {
+                    let centerPoint = CGPoint(x: frame.midX, y: frame.midY)
+                    postMouseClick(at: centerPoint)
+                    return "Clicked element \(elementID) at center coordinate (\(Int(centerPoint.x)), \(Int(centerPoint.y)))"
+                }
+            }
+        }
+
+        // 2. Check if raw coordinates (x, y) are specified
+        let xVal = (arguments["x"] as? Double) ?? (arguments["x"] as? Int).map { Double($0) }
+        let yVal = (arguments["y"] as? Double) ?? (arguments["y"] as? Int).map { Double($0) }
+
+        if let x = xVal, let y = yVal {
+            let point = CGPoint(x: x, y: y)
+            postMouseClick(at: point)
+            return "Clicked at coordinate (\(Int(x)), \(Int(y)))"
+        }
+
+        // 3. Coordinate as string "x,y"
+        if let coordString = arguments["coordinate"] as? String ?? arguments["pos"] as? String {
+            let components = coordString.components(separatedBy: ",")
+            if components.count == 2,
+               let x = Double(components[0].trimmingCharacters(in: .whitespaces)),
+               let y = Double(components[1].trimmingCharacters(in: .whitespaces)) {
+                let point = CGPoint(x: x, y: y)
+                postMouseClick(at: point)
+                return "Clicked at coordinate (\(Int(x)), \(Int(y)))"
+            }
+        }
+
+        return "Error: click requires either 'element_id' or 'x' and 'y' coordinates"
+    }
+
+    /// Scrolls the active view in a direction by a specified amount.
+    private func executeScroll(arguments: [String: Any]) throws -> String {
+        let direction = (arguments["direction"] as? String ?? "down").lowercased()
+        let amount = (arguments["amount"] as? Int32) ?? (arguments["amount"] as? Int).map { Int32($0) } ?? 5
+
+        let source = CGEventSource(stateID: .hidSystemState)
+        var deltaY: Int32 = 0
+        var deltaX: Int32 = 0
+
+        switch direction {
+        case "up":
+            deltaY = amount
+        case "down":
+            deltaY = -amount
+        case "left":
+            deltaX = amount
+        case "right":
+            deltaX = -amount
+        default:
+            deltaY = -amount
+        }
+
+        if let scrollEvent = CGEvent(scrollWheelEvent2Source: source, units: .line, wheelCount: 2, wheel1: deltaY, wheel2: deltaX, wheel3: 0) {
+            scrollEvent.post(tap: .cghidEventTap)
+            return "Scrolled \(direction) by \(amount) lines"
+        }
+
+        return "Error: failed to create scroll event"
+    }
+
+    /// Points Clicky's blue cursor overlay at the target coordinates.
+    private func executePoint(arguments: [String: Any]) -> String {
+        let xVal = (arguments["x"] as? Double) ?? (arguments["x"] as? Int).map { Double($0) }
+        let yVal = (arguments["y"] as? Double) ?? (arguments["y"] as? Int).map { Double($0) }
+
+        guard let x = xVal, let y = yVal else {
+            return "Error: point requires 'x' and 'y' coordinates"
+        }
+
+        let targetPoint = CGPoint(x: x, y: y)
+        if let manager = companionManager {
+            manager.setPointingTarget(location: targetPoint, label: "Target")
+            return "Pointed cursor overlay to (\(Int(x)), \(Int(y)))"
+        }
+        return "Pointed to (\(Int(x)), \(Int(y)))"
+    }
+
+    /// Pauses execution for the requested number of seconds.
+    private func executeWait(arguments: [String: Any]) async throws -> String {
+        let seconds = (arguments["seconds"] as? Double)
+            ?? (arguments["seconds"] as? Int).map { Double($0) }
+            ?? 1.0
+        let clampedSeconds = max(0.1, min(10.0, seconds))
+        try await Task.sleep(nanoseconds: UInt64(clampedSeconds * 1_000_000_000))
+        return "Waited \(String(format: "%.1f", clampedSeconds)) second(s)"
+    }
+
+    /// Marks the current active subgoal as done.
+    private func executeDone() -> String {
+        return "Subgoal marked done"
+    }
+
+    /// Escalates to the planner with a specified reason.
+    private func executeEscalate(arguments: [String: Any]) -> String {
+        let reason = (arguments["reason"] as? String) ?? "Action could not be completed"
+        return "Escalated: \(reason)"
+    }
 
     /// Opens a macOS application by name using NSWorkspace.
     private func executeOpenApp(arguments: [String: Any]) async throws -> String {
-        guard let appName = arguments["app_name"] as? String else {
-            return "Error: missing 'app_name' argument"
+        guard let appName = arguments["app_name"] as? String ?? arguments["name"] as? String else {
+            return "Error: missing 'app_name' or 'name' argument"
         }
 
         // Try NSWorkspace first — looks in /Applications and other standard locations
@@ -80,11 +245,18 @@ class AgentToolExecutor {
 
     /// Executes a shell command via /bin/zsh and returns stdout+stderr.
     private func executeRunTerminalCommand(arguments: [String: Any]) async throws -> String {
-        guard let command = arguments["command"] as? String else {
+        guard let command = (arguments["command"] as? String) ?? (arguments["cmd"] as? String) ?? (arguments["script"] as? String) else {
             return "Error: missing 'command' argument"
         }
         let output = try await runShellCommand(command)
-        return output.isEmpty ? "(command produced no output)" : output
+        if output.isEmpty {
+            let trimmedCommand = command.trimmingCharacters(in: .whitespaces)
+            if trimmedCommand.hasPrefix("open ") || trimmedCommand == "open" {
+                return "Successfully opened (command executed with exit status 0)"
+            }
+            return "Command executed successfully with exit status 0 (no output)"
+        }
+        return output
     }
 
     /// Opens a URL in the default browser.
@@ -275,7 +447,20 @@ class AgentToolExecutor {
             Task.detached(priority: .userInitiated) {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-                process.arguments = ["-c", command]
+                // Unescape any literal escaped quotes emitted by models (e.g. \"https://...\")
+                let normalizedCommand = command.replacingOccurrences(of: "\\\"", with: "\"")
+                // Use setopt NO_NOMATCH so zsh doesn't error with 'no matches found' when URLs or arguments contain '?' or '&'
+                process.arguments = ["-c", "setopt NO_NOMATCH; " + normalizedCommand]
+                process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+
+                var processEnvironment = ProcessInfo.processInfo.environment
+                let standardSystemSearchPath = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                if let existingPath = processEnvironment["PATH"] {
+                    processEnvironment["PATH"] = "\(standardSystemSearchPath):\(existingPath)"
+                } else {
+                    processEnvironment["PATH"] = standardSystemSearchPath
+                }
+                process.environment = processEnvironment
 
                 let stdoutPipe = Pipe()
                 let stderrPipe = Pipe()
@@ -342,5 +527,37 @@ class AgentToolExecutor {
         }
 
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - CGEvent & AX Helpers
+
+    private func postMouseClick(at point: CGPoint) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        if let mouseDown = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+           let mouseUp = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) {
+            mouseDown.post(tap: .cghidEventTap)
+            usleep(50000)
+            mouseUp.post(tap: .cghidEventTap)
+        }
+    }
+
+    private func copyElementFrame(axElement: AXUIElement) -> CGRect {
+        var positionValue: AnyObject?
+        var sizeValue: AnyObject?
+
+        var position = CGPoint.zero
+        var size = CGSize.zero
+
+        let positionResult = AXUIElementCopyAttributeValue(axElement, kAXPositionAttribute as CFString, &positionValue)
+        if positionResult == .success, let axVal = positionValue as! AXValue? {
+            AXValueGetValue(axVal, .cgPoint, &position)
+        }
+
+        let sizeResult = AXUIElementCopyAttributeValue(axElement, kAXSizeAttribute as CFString, &sizeValue)
+        if sizeResult == .success, let axVal = sizeValue as! AXValue? {
+            AXValueGetValue(axVal, .cgSize, &size)
+        }
+
+        return CGRect(origin: position, size: size)
     }
 }

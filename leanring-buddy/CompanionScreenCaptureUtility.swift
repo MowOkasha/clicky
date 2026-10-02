@@ -91,13 +91,19 @@ enum CompanionScreenCaptureUtility {
                 configuration.width = Int(CGFloat(maxDimension) * aspectRatio)
             }
 
-            let cgImage = try await SCScreenshotManager.captureImage(
+            // Wrap in autoreleasepool so the CGImage and NSBitmapImageRep (and their
+            // IOSurface kernel backing pages) are released immediately after JPEG encoding,
+            // rather than accumulating across all actor loop steps until ARC sweeps them.
+            let capturedCGImage = try await SCScreenshotManager.captureImage(
                 contentFilter: filter,
                 configuration: configuration
             )
+            let jpegDataOrNil: Data? = autoreleasepool {
+                NSBitmapImageRep(cgImage: capturedCGImage)
+                    .representation(using: .jpeg, properties: [.compressionFactor: 0.8])
+            }
 
-            guard let jpegData = NSBitmapImageRep(cgImage: cgImage)
-                    .representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
+            guard let jpegData = jpegDataOrNil else {
                 continue
             }
 

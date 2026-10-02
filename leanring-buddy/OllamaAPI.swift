@@ -4,7 +4,7 @@
 //
 //  Ollama API client supporting streaming chat with native tool calling.
 //  Images (screenshots) are sent as base64 alongside the user prompt so
-//  the single vision-language model (qwen3.5:9b-q5) can see the screen.
+//  the single vision-language model (qwen2.5vl:7b) can see the screen.
 //
 
 import Foundation
@@ -32,7 +32,7 @@ class OllamaAPI {
     var model: String
     private let session: URLSession
 
-    init(model: String = "qwen3.5:9b-q5") {
+    init(model: String = "qwen2.5vl:7b") {
         self.apiURL = URL(string: "http://localhost:11434/api/chat")!
         self.model = model
 
@@ -126,9 +126,15 @@ class OllamaAPI {
                 body["tools"] = tools
             }
 
+            // Pass options payload covering Performance cores (num_thread: 6)
+            // to ensure GPU dispatches aren't stalled by CPU orchestration
+            var options: [String: Any] = [
+                "num_thread": 6
+            ]
             if let temp = temperature {
-                body["options"] = ["temperature": temp]
+                options["temperature"] = temp
             }
+            body["options"] = options
 
             let bodyData = try JSONSerialization.data(withJSONObject: body)
             request.httpBody = bodyData

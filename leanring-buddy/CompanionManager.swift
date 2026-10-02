@@ -42,6 +42,15 @@ final class CompanionManager: ObservableObject {
     /// BlueCursorView uses this instead of a random pointer phrase.
     @Published var detectedElementBubbleText: String?
 
+    /// Sets the target location and bubble text for the cursor pointing animation.
+    func setPointingTarget(location: CGPoint, label: String? = nil) {
+        self.detectedElementScreenLocation = location
+        self.detectedElementBubbleText = label
+        if let matchingScreen = NSScreen.screens.first(where: { $0.frame.contains(location) }) {
+            self.detectedElementDisplayFrame = matchingScreen.frame
+        }
+    }
+
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
     @Published var onboardingVideoPlayer: AVPlayer?
@@ -65,6 +74,20 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+
+    // MARK: - Agent Task Progress & Dock
+
+    /// Whether an agentic multi-step task is currently executing.
+    @Published var isAgentTaskRunning: Bool = false
+
+    /// Live progress steps of the currently executing agent task.
+    @Published var agentTaskProgressSteps: [AgentTaskProgressStep] = []
+
+    /// Whether the top-right task dock is currently expanded via hover.
+    @Published var isAgentTaskDockExpanded: Bool = false
+
+    /// Dock window manager for the top-right task progress indicator.
+    let agentTaskDockWindowManager = AgentTaskDockWindowManager()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -76,9 +99,30 @@ final class CompanionManager: ObservableObject {
         return LocalTTSClient()
     }()
 
-    /// Tool executor for the agent loop — handles open_app, run_terminal_command, etc.
+    /// Tool executor for the agent loop — handles click, type, scroll, point, open_app, etc.
     private lazy var agentToolExecutor: AgentToolExecutor = {
-        return AgentToolExecutor()
+        let executor = AgentToolExecutor()
+        executor.companionManager = self
+        return executor
+    }()
+
+    // MARK: - Local Agent Architecture Components (oMLX, Perception, State, Planner, Actor, RAG)
+
+    let omlxClient = OMLXClient()
+    let perceptionManager = PerceptionManager()
+    let agentStateManager = AgentStateManager()
+    let localVectorStore = LocalVectorStore()
+
+    private lazy var agentPlanner: AgentPlanner = {
+        return AgentPlanner(omlxClient: omlxClient)
+    }()
+
+    private lazy var agentActorLoop: AgentActorLoop = {
+        return AgentActorLoop(
+            omlxClient: omlxClient,
+            toolExecutor: agentToolExecutor,
+            perceptionManager: perceptionManager
+        )
     }()
 
     /// The agentic loop orchestrator — runs think → act → observe until the model
@@ -118,8 +162,14 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isOverlayVisible: Bool = false
 
     /// The model used for all vision, reasoning, and tool calling. Persisted to UserDefaults.
-    /// Default is qwen3.5:9b-q5 — a single multimodal model replacing the previous two-model pipeline.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "qwen3.5:9b-q5"
+    /// Default is qwen2.5vl:7b — a unified multimodal vision-language model.
+    @Published var selectedModel: String = {
+        let saved = UserDefaults.standard.string(forKey: "selectedClaudeModel")
+        if saved == nil || saved == "qwen3.5:9b-q5" || saved == "qwen2.5-vl:7b" {
+            return "qwen2.5vl:7b"
+        }
+        return saved ?? "qwen2.5vl:7b"
+    }()
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
@@ -146,6 +196,8 @@ final class CompanionManager: ObservableObject {
             isOverlayVisible = true
         } else {
             overlayWindowManager.hideOverlay()
+            agentTaskDockWindowManager.hideDock()
+            isAgentTaskRunning = false
             isOverlayVisible = false
         }
     }
@@ -169,6 +221,11 @@ final class CompanionManager: ObservableObject {
         // Pre-warm local Ollama API by making a dummy connection
         // (Currently unused for local, but kept for future structure)
         _ = ollamaAPI
+
+        // Enforce idle model baseline in oMLX: Embedder and 4B pinned, 9B unloaded
+        Task {
+            await omlxClient.ensureIdleModelConfiguration()
+        }
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -521,181 +578,391 @@ final class CompanionManager: ObservableObject {
     // MARK: - Companion Prompt
 
     private static let companionVoiceResponseSystemPrompt = """
-    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and a vision model has analyzed their screen and provided you a detailed description of what's visible, including pixel coordinates for every UI element. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see screenshots of their screen when needed. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
     - all lowercase, casual, warm. no emojis.
     - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
     - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
-    - if the user's question relates to what's on their screen, reference specific things from the visual context description.
-    - if the screen context doesn't seem relevant to their question, just answer the question directly.
-    - you can help with anything — coding, writing, general knowledge, brainstorming.
+    - if the user's question relates to what's on their screen, reference specific things from the screenshots.
+    - if the screen doesn't seem relevant to their question, just answer the question directly.
+    - you can help with anything — coding, writing, general knowledge, brainstorming, executing multi-step tasks.
     - never say "simply" or "just".
     - don't read out code verbatim. describe what the code does or what needs to change conversationally.
     - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
-    - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
-    - if multiple screens are described, the one labeled "primary focus" or "cursor is here" is where the user's cursor is — prioritize that one but reference others if relevant.
+    - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained.
 
     element pointing:
-    you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
+    you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing.
 
-    don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at.
-
-    IMPORTANT: you do NOT see the screenshots directly — you receive a text description of the screen from a vision model. that description includes [x, y] pixel coordinates for every element it describes (for example: "a folder labeled 'Projects' at [450, 320]"). when you want to point at something, find the matching element in the visual context and use the EXACT coordinates from the description. do NOT invent or estimate coordinates — only use coordinates that appear explicitly in the visual context.
+    don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen.
 
     when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the origin (0,0) is the top-left corner of the screenshot, x increases rightward, y increases downward.
 
-    format: [POINT:x,y:label] where x,y are the integer pixel coordinates you read from the visual context description, and label is a short 1-3 word description of the element. if the element is on a secondary screen, append :screenN where N matches the screen number in the visual context (e.g. :screen2).
+    format: [POINT:x,y:label] where x,y are the integer pixel coordinates on the screenshot, and label is a short 1-3 word description of the element. if the element is on a secondary screen, append :screenN where N matches the screen number (e.g. :screen2).
 
-    if pointing wouldn't help, or if the element's coordinates are not present in the visual context, append [POINT:none].
+    if pointing wouldn't help, or if no screenshot is present, append [POINT:none].
 
     examples:
-    - user asks where the Projects folder is, visual context says "a folder labeled 'Projects' at [450, 320]": "that's the Projects folder right there on your desktop. [POINT:450,320:Projects folder]"
+    - user asks where the Projects folder is: "that's the Projects folder right there on your desktop. [POINT:450,320:Projects folder]"
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. [POINT:none]"
-    - user asks how to commit in xcode, visual context says "Source Control menu in the menu bar at [285, 11]": "see that source control menu up top? click that and hit commit, or you can use command option c. [POINT:285,11:source control]"
-    - element is on screen 2, visual context says "terminal window at [400, 300] on screen 2": "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
+    - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c. [POINT:285,11:source control]"
+    - element is on screen 2: "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
     // MARK: - AI Response Pipeline
 
-    /// Captures screenshots, then runs the full agentic loop:
-    ///   1. qwen3.5:9b-q5 receives the screenshots + transcript + memories + all tool definitions
-    ///   2. If the model calls tools -> execute them -> feed results back -> repeat (up to 10 times)
-    ///   3. Once the model produces a final text response -> TTS + pointing
-    ///
-    /// The single model handles vision, reasoning, and tool calling in one load.
+    /// Strips any <think>...</think> tags that reasoning models may output.
+    static func stripThinkingTags(from text: String) -> String {
+        let pattern = "(?s)<think>.*?</think>"
+        return text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Orchestrates the intelligent request routing, direct question answering,
+    /// selective perception, and agentic workflow execution:
+    ///   1. First-turn triage using resident qwen3.5-4b evaluates the user prompt and screen state.
+    ///   2. Direct questions are answered immediately via TTS (no dock, no screenshots, no 9B planner).
+    ///   3. Single direct tools are executed immediately.
+    ///   4. Multi-step workflows move the blue cursor to the top-right dock, swap memory to 9B planner to plan,
+    ///      and then swap back to 4B actor to execute each subgoal.
     private func processUserTranscript(transcript: String) {
         currentResponseTask?.cancel()
         localTTSClient.stopPlayback()
 
+        // Reset previous task state
+        isAgentTaskRunning = false
+        agentTaskProgressSteps = []
+        agentTaskDockWindowManager.hideDock()
+
         currentResponseTask = Task {
             voiceState = .processing
+            DebugEventLogger.shared.log(.voiceInput(transcript: transcript))
 
             do {
-                // Build conversation history in the flat role/content format for OllamaAPI
-                let flatConversationHistory: [(role: String, content: String)] = conversationHistory.flatMap { entry in
-                    [(role: "user", content: entry.userTranscript),
-                     (role: "assistant", content: entry.assistantResponse)]
-                }
-
-                // Step 1: Capture screenshots of all connected displays
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                // Step 1: Capture initial screen state via perception (AXUIElement hierarchy first)
+                let initialPerception = await perceptionManager.captureCurrentScreenState(allowScreenshotFallback: true)
                 guard !Task.isCancelled else { return }
 
-                // Build labeled image array so the model knows which screen is which
-                let labeledImages = screenCaptures.map { capture in
-                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                    return (data: capture.imageData, label: capture.label + dimensionInfo)
+                // Step 2: Local RAG Lookup (Embedder + in-process vector store)
+                var retrievedRAGHints: [String] = []
+                do {
+                    let queryEmbedding = try await omlxClient.generateEmbeddingVector(for: transcript)
+                    let pastTrajectories = await localVectorStore.findRelevantPastTrajectories(
+                        queryEmbedding: queryEmbedding,
+                        appName: initialPerception.frontmostApplicationName
+                    )
+                    let cachedUIMap = await localVectorStore.findAppUIMap(appName: initialPerception.frontmostApplicationName)
+
+                    retrievedRAGHints = pastTrajectories
+                    if let uiMapHint = cachedUIMap {
+                        retrievedRAGHints.append(uiMapHint)
+                    }
+                    print("📚 CompanionManager: Retrieved \(retrievedRAGHints.count) RAG hint(s)")
+                    DebugEventLogger.shared.log(.ragLookup(hintCount: retrievedRAGHints.count, error: nil))
+                } catch {
+                    print("⚠️ CompanionManager: Local RAG lookup skipped/failed: \(error)")
+                    DebugEventLogger.shared.log(.ragLookup(hintCount: 0, error: error.localizedDescription))
                 }
 
-                // Step 2: Retrieve relevant memories from Mem0 (no model load -- calls the sidecar only)
-                let memories = await Mem0Client.shared.searchRelevantMemories(forQuery: transcript)
-                let memoryContext = memories.isEmpty ? "" : "\n\nRelevant memories about this user:\n" + memories.map { "- \($0)" }.joined(separator: "\n")
-
-                // Step 3: Run the agentic loop.
-                // qwen3.5:9b-q5 is a unified vision-language model -- screenshots are
-                // passed directly as images so it sees the screen in the same call
-                // where it reasons and decides whether to call tools.
-                let agentResult = try await agentLoop.run(
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt + memoryContext,
-                    initialImages: labeledImages,
-                    conversationHistory: flatConversationHistory,
-                    userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // Spinner stays until TTS plays -- no streaming text display during tool loops
-                    },
-                    onToolCallStarted: { toolName, _ in
-                        print("Executing tool: \(toolName)")
-                    }
+                // Step 3: Initialize External State Manager (state lives outside model)
+                agentStateManager.initializeTaskSession(
+                    userGoal: transcript,
+                    retrievedRAGHints: retrievedRAGHints
                 )
 
-                // Unload the model now that the agent loop has finished
-                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
-
+                // Step 4: First-turn Triage via resident Actor (qwen3.5-4b)
+                let triageDecision = try await agentActorLoop.evaluateTriageTurn(
+                    stateManager: agentStateManager,
+                    perceptionResult: initialPerception
+                )
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from the model's final response
-                let parseResult = Self.parsePointingCoordinates(from: agentResult.finalResponseText)
-                let spokenText = parseResult.spokenText
+                switch triageDecision {
+                case .directAnswer(let directAnswerText):
+                    print("💬 CompanionManager: Direct answer from Actor: \"\(directAnswerText)\"")
+                    voiceState = .responding
 
-                // Switch to idle before setting the pointing location so the
-                // triangle becomes visible and can start its flight animation.
-                let hasPointCoordinate = parseResult.coordinate != nil
-                if hasPointCoordinate {
-                    voiceState = .idle
-                }
-
-                // Pick the screen capture matching the model's screen number
-                let targetScreenCapture: CompanionScreenCapture? = {
-                    if let screenNumber = parseResult.screenNumber,
-                       screenNumber >= 1 && screenNumber <= screenCaptures.count {
-                        return screenCaptures[screenNumber - 1]
+                    conversationHistory.append((
+                        userTranscript: transcript,
+                        assistantResponse: directAnswerText
+                    ))
+                    if conversationHistory.count > 10 {
+                        conversationHistory.removeFirst(conversationHistory.count - 10)
                     }
-                    return screenCaptures.first(where: { $0.isCursorScreen })
-                }()
 
-                if let pointCoordinate = parseResult.coordinate,
-                   let targetScreenCapture {
-                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
-                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
-                    let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
-                    let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
-                    let displayFrame = targetScreenCapture.displayFrame
+                    // Speak the direct answer out loud
+                    do {
+                        try await localTTSClient.speakText(directAnswerText)
+                    } catch {
+                        print("Local TTS direct answer error: \(error)")
+                    }
 
-                    let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                    let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-                    let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                    let displayLocalY = clampedY * (displayHeight / screenshotHeight)
-                    let appKitY = displayHeight - displayLocalY
-                    let globalLocation = CGPoint(
-                        x: displayLocalX + displayFrame.origin.x,
-                        y: appKitY + displayFrame.origin.y
+                    voiceState = .idle
+                    scheduleTransientHideIfNeeded()
+                    return
+
+                case .directTool(let toolCall):
+                    print("⚡️ CompanionManager: Direct tool from Actor triage: \(toolCall.toolName)")
+                    voiceState = .responding
+                    try? await localTTSClient.speakText("on it")
+                    voiceState = .processing
+
+                    agentToolExecutor.currentPerceptionLiveElementMap = initialPerception.elementLiveReferenceMap
+                    let executionResult = await agentToolExecutor.execute(
+                        toolName: toolCall.toolName,
+                        arguments: toolCall.arguments
+                    )
+                    let toolSummary = AgentTaskProgressStep.createSummary(
+                        toolName: toolCall.toolName,
+                        arguments: toolCall.arguments
+                    )
+                    print("⚡️ Direct tool executed: \(toolSummary) -> \(executionResult)")
+
+                    let spokenFeedback: String
+                    let informationalTools = ["run_terminal_command", "search_web", "read_webpage", "read_clipboard", "list_running_apps"]
+                    if informationalTools.contains(toolCall.toolName) {
+                        // For terminal commands and informational tools, synthesize a natural spoken response answering the user's question
+                        spokenFeedback = await agentActorLoop.synthesizeSpokenAnswer(
+                            userGoal: transcript,
+                            toolName: toolCall.toolName,
+                            toolResult: executionResult
+                        )
+                    } else if executionResult.lowercased().hasPrefix("error") {
+                        spokenFeedback = "I ran into an issue: \(executionResult)"
+                    } else {
+                        spokenFeedback = "Done!"
+                    }
+
+                    voiceState = .responding
+                    DebugEventLogger.shared.log(.tts(spokenText: spokenFeedback))
+                    try? await localTTSClient.speakText(spokenFeedback)
+
+                    conversationHistory.append((
+                        userTranscript: transcript,
+                        assistantResponse: spokenFeedback
+                    ))
+                    if conversationHistory.count > 10 {
+                        conversationHistory.removeFirst(conversationHistory.count - 10)
+                    }
+
+                    voiceState = .idle
+                    scheduleTransientHideIfNeeded()
+                    return
+
+                case .needsPlan(let planningReason):
+                    print("📋 CompanionManager: Multi-step task needs plan (\(planningReason)). Activating dock and planner...")
+
+                    // Upfront spoken confirmation
+                    voiceState = .responding
+                    try? await localTTSClient.speakText("on it")
+                    guard !Task.isCancelled else { return }
+
+                    // Move blue cursor to top-right task dock
+                    voiceState = .processing
+                    isAgentTaskRunning = true
+                    agentTaskProgressSteps = [
+                        AgentTaskProgressStep(
+                            toolName: "perception",
+                            summary: "Inspecting UI hierarchy & active window...",
+                            isComplete: true
+                        ),
+                        AgentTaskProgressStep(
+                            toolName: "plan",
+                            summary: "Planning: \(planningReason)",
+                            isComplete: false
+                        )
+                    ]
+
+                    // SWAP TO PLANNER (qwen3.5-9b): unpin 4B -> unload 4B -> pin 9B
+                    try await omlxClient.swapToPlanner()
+                    guard !Task.isCancelled else {
+                        try? await omlxClient.swapToActor()
+                        isAgentTaskRunning = false
+                        agentTaskDockWindowManager.hideDock()
+                        return
+                    }
+
+                    // Invoke Planner (qwen3.5-9b on demand)
+                    let plannedSubgoals = try await agentPlanner.generatePlan(
+                        stateManager: agentStateManager,
+                        screenSummaryText: initialPerception.formattedElementListText,
+                        fallbackScreenshots: initialPerception.fallbackScreenshots
                     )
 
-                    detectedElementScreenLocation = globalLocation
-                    detectedElementDisplayFrame = displayFrame
-                    print("Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) -> \"\(parseResult.elementLabel ?? "element")\"")
-                } else {
-                    print("Element pointing: \(parseResult.elementLabel ?? "no element")")
-                }
+                    agentStateManager.updatePlannedSubgoals(with: plannedSubgoals)
+                    if let planIndex = agentTaskProgressSteps.firstIndex(where: { $0.toolName == "plan" }) {
+                        agentTaskProgressSteps[planIndex].isComplete = true
+                    }
 
-                // Save this exchange to in-session conversation history
-                conversationHistory.append((
-                    userTranscript: transcript,
-                    assistantResponse: spokenText
-                ))
+                    for subgoal in plannedSubgoals {
+                        agentTaskProgressSteps.append(
+                            AgentTaskProgressStep(toolName: "subgoal", summary: subgoal.description, isComplete: false)
+                        )
+                    }
 
-                // Keep only the last 10 exchanges to avoid unbounded context growth
-                if conversationHistory.count > 10 {
-                    conversationHistory.removeFirst(conversationHistory.count - 10)
-                }
+                    // SWAP TO ACTOR (qwen3.5-4b): unpin 9B -> unload 9B -> pin 4B
+                    try await omlxClient.swapToActor()
+                    guard !Task.isCancelled else {
+                        isAgentTaskRunning = false
+                        agentTaskDockWindowManager.hideDock()
+                        return
+                    }
 
-                print("Conversation history: \(conversationHistory.count) exchanges, \(agentResult.executedToolCalls.count) tool call(s) this turn")
+                    var replanAttemptsCount = 0
+                    let maximumReplanAttemptsAllowed = 2
 
-                // Speak the response. Keep the spinner until TTS audio actually begins.
-                if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    do {
-                        try await localTTSClient.speakText(spokenText)
-                        voiceState = .responding
-                    } catch {
-                        print("Local TTS error: \(error)")
-                        speakCreditsErrorFallback()
+                    // Run Actor Loop (resident qwen3.5-4b)
+                    let actorResult = try await agentActorLoop.runActorLoop(
+                        stateManager: agentStateManager,
+                        onStepStarted: { [weak self] toolName, arguments in
+                            guard let self = self else { return }
+                            let summary = AgentTaskProgressStep.createSummary(toolName: toolName, arguments: arguments)
+                            self.agentTaskProgressSteps.append(
+                                AgentTaskProgressStep(toolName: toolName, summary: summary, isComplete: false)
+                            )
+                        },
+                        onStepCompleted: { [weak self] toolName, _ in
+                            guard let self = self else { return }
+                            if let lastIndex = self.agentTaskProgressSteps.indices.last {
+                                self.agentTaskProgressSteps[lastIndex].isComplete = true
+                            }
+                        },
+                        onEscalationNeeded: { [weak self] failureReason in
+                            guard let self = self else { return false }
+
+                            replanAttemptsCount += 1
+                            if replanAttemptsCount > maximumReplanAttemptsAllowed {
+                                print("🚨 CompanionManager: Reached maximum replan limit (\(maximumReplanAttemptsAllowed)). Stopping task to prevent infinite loop.")
+                                self.agentStateManager.recordTaskFailure(reason: "Gave up after \(maximumReplanAttemptsAllowed) replan attempts: \(failureReason)")
+                                return false
+                            }
+
+                            print("🚨 CompanionManager: Escalation triggered (\(failureReason)). Replanning with qwen3.5-9b (Attempt \(replanAttemptsCount)/\(maximumReplanAttemptsAllowed))...")
+                            DebugEventLogger.shared.log(.replan(reason: "\(failureReason) [attempt \(replanAttemptsCount)/\(maximumReplanAttemptsAllowed)]"))
+                            self.agentTaskProgressSteps.append(
+                                AgentTaskProgressStep(toolName: "replan", summary: "Replanning: \(failureReason)", isComplete: false)
+                            )
+
+                            // SWAP TO PLANNER for replanning
+                            do {
+                                try await self.omlxClient.swapToPlanner()
+                            } catch {
+                                print("⚠️ CompanionManager: Failed to swap to planner: \(error)")
+                                return false
+                            }
+
+                            let freshPerception = await self.perceptionManager.captureCurrentScreenState(
+                                allowScreenshotFallback: true
+                            )
+                            let replannedSubgoals = try? await self.agentPlanner.generatePlan(
+                                stateManager: self.agentStateManager,
+                                screenSummaryText: freshPerception.formattedElementListText,
+                                fallbackScreenshots: freshPerception.fallbackScreenshots
+                            )
+
+                            // SWAP BACK TO ACTOR to resume execution
+                            do {
+                                try await self.omlxClient.swapToActor()
+                            } catch {
+                                print("⚠️ CompanionManager: Failed to swap back to actor: \(error)")
+                            }
+
+                            if let newSubgoals = replannedSubgoals {
+                                self.agentStateManager.updatePlannedSubgoals(with: newSubgoals)
+                                if let replanIndex = self.agentTaskProgressSteps.firstIndex(where: { $0.toolName == "replan" && !$0.isComplete }) {
+                                    self.agentTaskProgressSteps[replanIndex].isComplete = true
+                                }
+                                for subgoal in newSubgoals {
+                                    self.agentTaskProgressSteps.append(
+                                        AgentTaskProgressStep(toolName: "subgoal", summary: subgoal.description, isComplete: false)
+                                    )
+                                }
+                                return true
+                            }
+                            return false
+                        }
+                    )
+
+                    // Mark all remaining task dock steps complete
+                    for index in agentTaskProgressSteps.indices {
+                        agentTaskProgressSteps[index].isComplete = true
+                    }
+
+                    guard !Task.isCancelled else {
+                        isAgentTaskRunning = false
+                        agentTaskDockWindowManager.hideDock()
+                        return
+                    }
+
+                    // Task execution concluded
+                    isAgentTaskRunning = false
+                    DebugEventLogger.shared.log(.taskCompleted(
+                        totalSteps: actorResult.totalStepsTaken,
+                        isSuccessful: actorResult.isTaskSuccessful,
+                        failureReason: actorResult.isTaskSuccessful ? nil : agentStateManager.taskFailureReason
+                    ))
+
+                    // Step 9: On task success, write trajectory back into RAG store
+                    if actorResult.isTaskSuccessful {
+                        let trajectorySummary = agentStateManager.buildCompletedTrajectorySummary()
+                        Task {
+                            if let embedding = try? await omlxClient.generateEmbeddingVector(for: transcript) {
+                                await localVectorStore.saveSuccessfulTrajectory(
+                                    taskGoal: transcript,
+                                    appName: initialPerception.frontmostApplicationName,
+                                    trajectorySummary: trajectorySummary,
+                                    embedding: embedding
+                                )
+                                DebugEventLogger.shared.log(.ragSave(taskGoal: transcript))
+                            }
+                        }
+                    }
+
+                    // Step 10: Speak final confirmation to the user
+                    let completionPhrase: String
+                    if actorResult.isTaskSuccessful {
+                        completionPhrase = "Done! I completed that for you."
+                    } else {
+                        completionPhrase = await agentActorLoop.generateFailureExplanation(stateManager: agentStateManager)
+                    }
+
+                    voiceState = .responding
+                    DebugEventLogger.shared.log(.tts(spokenText: completionPhrase))
+                    try? await localTTSClient.speakText(completionPhrase)
+                    voiceState = .idle
+                    scheduleTransientHideIfNeeded()
+
+                    // Save exchange
+                    conversationHistory.append((
+                        userTranscript: transcript,
+                        assistantResponse: completionPhrase
+                    ))
+                    if conversationHistory.count > 10 {
+                        conversationHistory.removeFirst(conversationHistory.count - 10)
+                    }
+
+                    // Flush memories to Mem0
+                    pendingMemories.append((userTranscript: transcript, assistantResponse: completionPhrase))
+                    if pendingMemories.count >= 5 {
+                        await flushPendingMemories()
                     }
                 }
-
-                // Flush memories to Mem0 after TTS starts and the model is fully unloaded
-                pendingMemories.append((userTranscript: transcript, assistantResponse: spokenText))
-                if pendingMemories.count >= 5 {
-                    await flushPendingMemories()
-                }
             } catch is CancellationError {
-                // User spoke again -- response was interrupted
-                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
+                isAgentTaskRunning = false
+                agentTaskDockWindowManager.hideDock()
+                Task {
+                    await omlxClient.ensureIdleModelConfiguration()
+                }
             } catch {
                 print("Companion response error: \(error)")
-                speakCreditsErrorFallback()
-                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
+                isAgentTaskRunning = false
+                agentTaskDockWindowManager.hideDock()
+                handleCompanionPipelineError(error, userTranscript: transcript)
+                Task {
+                    await omlxClient.ensureIdleModelConfiguration()
+                }
             }
 
             if !Task.isCancelled {
@@ -737,14 +1004,41 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Speaks a hardcoded error message using macOS system TTS when API
-    /// credits run out. Uses NSSpeechSynthesizer so it works even when
-    /// ElevenLabs is down.
-    private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
-        let synthesizer = NSSpeechSynthesizer()
-        synthesizer.startSpeaking(utterance)
+    /// Handles unexpected errors in the companion pipeline and provides a clear,
+    /// friendly spoken explanation of the actual issue rather than a misleading credit message.
+    private func handleCompanionPipelineError(_ error: Error, userTranscript: String) {
+        let errorDescription = error.localizedDescription
+        DebugEventLogger.shared.log(.error(context: "CompanionPipeline", message: errorDescription))
+
+        let spokenErrorMessage: String
+        let lowercasedError = errorDescription.lowercased()
+        if lowercasedError.contains("could not connect") || lowercasedError.contains("connection refused") || lowercasedError.contains("connection reset") {
+            spokenErrorMessage = "I couldn't connect to the local model server on port 8000. Please check that omlx is running."
+        } else if lowercasedError.contains("timed out") || lowercasedError.contains("timeout") {
+            spokenErrorMessage = "The local model took too long to respond. Please try again."
+        } else {
+            spokenErrorMessage = "Sorry, I ran into an issue: \(errorDescription)"
+        }
+
         voiceState = .responding
+        Task {
+            do {
+                try await localTTSClient.speakText(spokenErrorMessage)
+            } catch {
+                let synthesizer = NSSpeechSynthesizer()
+                synthesizer.startSpeaking(spokenErrorMessage)
+            }
+            voiceState = .idle
+            scheduleTransientHideIfNeeded()
+        }
+
+        conversationHistory.append((
+            userTranscript: userTranscript,
+            assistantResponse: spokenErrorMessage
+        ))
+        if conversationHistory.count > 10 {
+            conversationHistory.removeFirst(conversationHistory.count - 10)
+        }
     }
 
     // MARK: - Point Tag Parsing
@@ -941,7 +1235,7 @@ final class CompanionManager: ObservableObject {
     the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. origin (0,0) is top-left. x increases rightward, y increases downward.
     """
 
-    /// Captures a screenshot and asks the single qwen3.5:9b-q5 model to find
+    /// Captures a screenshot and asks the single qwen2.5vl:7b model to find
     /// something interesting to point at. Used during onboarding to demo the
     /// pointing feature while the intro video plays.
     func performOnboardingDemoInteraction() {
@@ -960,7 +1254,7 @@ final class CompanionManager: ObservableObject {
                 let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
                 let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
 
-                // Send screenshot directly to qwen3.5:9b-q5 (unified vision + reasoning)
+                // Send screenshot directly to qwen2.5vl:7b (unified vision + reasoning)
                 // No separate vision model call needed -- the single model sees the screen.
                 let agentResult = try await agentLoop.run(
                     systemPrompt: Self.onboardingDemoSystemPrompt,

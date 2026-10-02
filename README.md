@@ -135,39 +135,73 @@ The app will appear in your menu bar (not the dock). Click the icon to open the 
 
 ## Architecture
 
-If you want the full technical breakdown, read `CLAUDE.md`. But here's the short version:
+If you want the full technical breakdown, read `AGENTS.md` (or `CLAUDE.md`). Here's the short version:
 
-**Menu bar app** (no dock icon) with two `NSPanel` windows — one for the control panel dropdown, one for the full-screen transparent cursor overlay. Push-to-talk streams audio over a websocket to AssemblyAI, sends the transcript + screenshot to Claude via streaming SSE, and plays the response through ElevenLabs TTS. Claude can embed `[POINT:x,y:label:screenN]` tags in its responses to make the cursor fly to specific UI elements across multiple monitors. All three APIs are proxied through a Cloudflare Worker.
+- **Menu bar app** (`LSUIElement=true`, no dock icon) with custom `NSPanel` floating windows.
+- **Local Multi-Model Agent Architecture** served by **oMLX** (`http://localhost:8000/v1`):
+  - `qwen3.5-4b`: Pinned, resident actor/grounding model handling tool execution
+  - `qwen3.5-9b`: On-demand planner decomposing goals into verifiable subgoals and replanning on escalation
+  - `qwen3-embedding-0.6b`: Pinned, resident embedder for RAG retrieval
+- **Perception**: macOS Accessibility API (`AXUIElement`) inspection first; ScreenCaptureKit screenshot fallback only when the accessibility tree is insufficient.
+- **State Lives Outside the Model**: Task state, planned subgoals, compressed action history, and failure counters live in `AgentStateManager` in Clicky's own app layer. Prompts are reconstructed fresh on every turn.
+- **Pure Swift In-Process RAG**: Built-in SQLite vector store (`LocalVectorStore.swift`) with Apple Accelerate `vDSP` cosine similarity for past trajectories and per-app UI maps. No external sidecars needed.
+- **Top-Right Task Dock**: When executing a task, Clicky relocates to a floating badge below the menu bar clock, expanding on hover to reveal tool-by-tool progress.
+- **Speech**: On-device Apple `SFSpeechRecognizer` for push-to-talk (Control + Option) and `AVSpeechSynthesizer` for voice output.
 
 ## Project structure
 
 ```
-leanring-buddy/          # Swift source (yes, the typo stays)
-  CompanionManager.swift    # Central state machine
-  CompanionPanelView.swift  # Menu bar panel UI
-  ClaudeAPI.swift           # Claude streaming client
-  ElevenLabsTTSClient.swift # Text-to-speech playback
-  OverlayWindow.swift       # Blue cursor overlay
-  AssemblyAI*.swift         # Real-time transcription
-  BuddyDictation*.swift     # Push-to-talk pipeline
-worker/                  # Cloudflare Worker proxy
-  src/index.ts              # Three routes: /chat, /tts, /transcribe-token
-CLAUDE.md                # Full architecture doc (agents read this)
+leanring-buddy/              # Swift source
+  CompanionManager.swift        # Central state machine & pipeline coordinator
+  CompanionPanelView.swift      # Menu bar panel UI
+  OMLXClient.swift              # OpenAI-compatible oMLX client (localhost:8000/v1)
+  PerceptionManager.swift       # AXUIElement hierarchy inspection + screenshot fallback
+  AgentStateManager.swift       # External task state manager
+  AgentPlanner.swift            # Goal decomposition & replanning (qwen3.5-9b)
+  AgentActorLoop.swift          # Step-by-step tool execution loop (qwen3.5-4b)
+  AgentToolExecutor.swift       # Tool execution (click, type, scroll, point, etc.)
+  LocalVectorStore.swift        # In-process SQLite + Accelerate RAG store
+  OverlayWindow.swift           # Blue cursor overlay & flight animations
+  AgentTaskDockWindow.swift     # Top-right task progress dock
+  BuddyDictationManager.swift   # Push-to-talk voice pipeline
+AGENTS.md                     # Full architecture doc & conventions (CLAUDE.md symlink)
 ```
 
 ## Contributing
 
-PRs welcome. If you're using Claude Code, it already knows the codebase — just tell it what you want to build and point it at `CLAUDE.md`.
+PRs welcome. If you're using Claude Code or an AI agent, it already knows the codebase — point it at `AGENTS.md` (or `CLAUDE.md`).
 
 Got feedback? DM me on X [@farzatv](https://x.com/farzatv).
 
+## How to Run
 
-how to run:
+### 1. Start the oMLX Model Server
+Make sure [oMLX](https://github.com/the-omlx/omlx) is installed and serving your models:
 
-1: ollama serve
-2:ollama pull qwen2.5vl:7b
-ollama pull deepseek-coder-v2:lite
-ollama pull nomic-embed-text
-3: cd into memory-server
-uv pip install ollama -e .
-uv run python server.py
+```bash
+source vlm-env/bin/activate
+omlx serve --model-dir ~/models
+```
+
+In the oMLX admin dashboard (`http://localhost:8000/admin`):
+- Pin `qwen3.5-4b` (resident actor/grounding)
+- Pin `qwen3-embedding-0.6b` (resident embedder)
+- Leave `qwen3.5-9b` unpinned with a ~90s idle TTL (on-demand planner)
+
+### 2. Launch Clicky in Xcode
+```bash
+open leanring-buddy.xcodeproj
+```
+
+In Xcode:
+1. Select the `leanring-buddy` scheme.
+2. Under Signing & Capabilities, select your development signing team.
+3. Press **Cmd + R** to build and run.
+
+> **Note**: Do **NOT** run `xcodebuild` from the terminal — it invalidates macOS TCC (Transparency, Consent, and Control) permissions for screen recording and accessibility.
+
+### 3. Permissions & Usage
+On first launch:
+1. Click the Clicky icon in your menu bar.
+2. Grant the required permissions (**Microphone**, **Accessibility**, **Screen Recording**).
+3. Hold **Control + Option** and speak your request.
