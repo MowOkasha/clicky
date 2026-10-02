@@ -253,7 +253,7 @@ class AgentStateManager: ObservableObject {
         return sections.joined(separator: "\n\n")
     }
 
-    /// Constructs a fresh user prompt for the Actor (qwen3.5-4b).
+    /// Constructs a fresh user prompt for the Actor (qwen3.5-9b).
     ///
     /// - Parameter currentUIStateText: The visible element list (preferred) or screenshot notice.
     func constructActorUserPrompt(currentUIStateText: String) -> String {

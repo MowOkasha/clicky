@@ -222,7 +222,7 @@ final class CompanionManager: ObservableObject {
         // (Currently unused for local, but kept for future structure)
         _ = ollamaAPI
 
-        // Enforce idle model baseline in oMLX: Embedder and 4B pinned, 9B unloaded
+        // Enforce idle model baseline in oMLX: Embedder and 9B pinned, legacy 4B evicted
         Task {
             await omlxClient.ensureIdleModelConfiguration()
         }
@@ -622,11 +622,11 @@ final class CompanionManager: ObservableObject {
 
     /// Orchestrates the intelligent request routing, direct question answering,
     /// selective perception, and agentic workflow execution:
-    ///   1. First-turn triage using resident qwen3.5-4b evaluates the user prompt and screen state.
+    ///   1. First-turn triage using resident qwen3.5-9b evaluates the user prompt and screen state.
     ///   2. Direct questions are answered immediately via TTS (no dock, no screenshots, no 9B planner).
     ///   3. Single direct tools are executed immediately.
-    ///   4. Multi-step workflows move the blue cursor to the top-right dock, swap memory to 9B planner to plan,
-    ///      and then swap back to 4B actor to execute each subgoal.
+    ///   4. Multi-step workflows move the blue cursor to the top-right dock, plan via qwen3.5-9b,
+    ///      and execute each subgoal via qwen3.5-9b.
     private func processUserTranscript(transcript: String) {
         currentResponseTask?.cancel()
         localTTSClient.stopPlayback()
@@ -672,7 +672,7 @@ final class CompanionManager: ObservableObject {
                     retrievedRAGHints: retrievedRAGHints
                 )
 
-                // Step 4: First-turn Triage via resident Actor (qwen3.5-4b)
+                // Step 4: First-turn Triage via resident qwen3.5-9b
                 let triageDecision = try await agentActorLoop.evaluateTriageTurn(
                     stateManager: agentStateManager,
                     perceptionResult: initialPerception
@@ -775,7 +775,7 @@ final class CompanionManager: ObservableObject {
                         )
                     ]
 
-                    // SWAP TO PLANNER (qwen3.5-9b): unpin 4B -> unload 4B -> pin 9B
+                    // Activate Planner (qwen3.5-9b resident)
                     try await omlxClient.swapToPlanner()
                     guard !Task.isCancelled else {
                         try? await omlxClient.swapToActor()
@@ -802,7 +802,7 @@ final class CompanionManager: ObservableObject {
                         )
                     }
 
-                    // SWAP TO ACTOR (qwen3.5-4b): unpin 9B -> unload 9B -> pin 4B
+                    // Activate Actor (qwen3.5-9b resident)
                     try await omlxClient.swapToActor()
                     guard !Task.isCancelled else {
                         isAgentTaskRunning = false
@@ -813,7 +813,7 @@ final class CompanionManager: ObservableObject {
                     var replanAttemptsCount = 0
                     let maximumReplanAttemptsAllowed = 2
 
-                    // Run Actor Loop (resident qwen3.5-4b)
+                    // Run Actor Loop (resident qwen3.5-9b)
                     let actorResult = try await agentActorLoop.runActorLoop(
                         stateManager: agentStateManager,
                         onStepStarted: { [weak self] toolName, arguments in

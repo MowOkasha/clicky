@@ -5,9 +5,8 @@
 
 ## Overview
 
-macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via Apple's on-device SFSpeechRecognizer, and executes tasks using a local multi-model agent architecture served by oMLX (`http://localhost:8000/v1`):
-- **Actor / Grounding**: `qwen3.5-4b` (pinned, resident)
-- **Planner**: `qwen3.5-9b` (on-demand, ~90s idle TTL)
+macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via Apple's on-device SFSpeechRecognizer, and executes tasks using a local single-model agent architecture served by oMLX (`http://localhost:8000/v1`):
+- **Generative Model (Triage, Planner, Actor)**: `qwen3.5-9b` (pinned, resident)
 - **Embedder**: `qwen3-embedding-0.6b` (pinned, resident)
 
 Task state lives entirely outside model context in an external state manager. Perception reads the macOS `AXUIElement` hierarchy first, falling back to multi-monitor screenshots only when the accessibility tree is insufficient. Past trajectories and UI maps are retrieved from a pure Swift in-process SQLite vector store using Apple's Accelerate framework. When executing a task, Clicky relocates to a task progress dock below the menu bar clock in the top-right corner, expanding on hover to reveal tool-by-tool progress. Spoken replies are delivered via AVSpeechSynthesizer with element pointing via the blue cursor overlay.
@@ -17,9 +16,8 @@ Task state lives entirely outside model context in an external state manager. Pe
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **Model Server**: oMLX serving three models over an OpenAI-compatible API at `http://localhost:8000/v1`
-  - `qwen3.5-4b`: Pinned, resident actor/grounding model handling tool execution
-  - `qwen3.5-9b`: On-demand planner decomposing goals into verifiable subgoals and replanning on escalation
+- **Model Server**: oMLX serving two models over an OpenAI-compatible API at `http://localhost:8000/v1`
+  - `qwen3.5-9b`: Pinned, resident model handling triage, high-level planning, and step-by-step tool execution with thinking tags disabled for instant responses
   - `qwen3-embedding-0.6b`: Pinned, resident embedder for RAG retrieval
 - **Speech-to-Text**: Apple SFSpeechRecognizer (on-device, zero-latency push-to-talk)
 - **Text-to-Speech**: AVSpeechSynthesizer (on-device, zero-latency)
@@ -43,7 +41,7 @@ User speaks (ctrl+option held)
   → LocalVectorStore: RAG lookup via qwen3-embedding-0.6b for past trajectories & app UI map
   → AgentStateManager: initializes session with goal + RAG hints (state lives outside model)
   → AgentPlanner: qwen3.5-9b decomposes goal into ordered subgoals
-  → AgentActorLoop (resident qwen3.5-4b):
+  → AgentActorLoop (resident qwen3.5-9b):
       For each subgoal:
         → Capture fresh screen state (AX tree preferred)
         → Reconstruct fresh prompt from AgentStateManager
@@ -58,13 +56,11 @@ User speaks (ctrl+option held)
 
 ### Key Architecture Decisions
 
-**State Lives Outside the Model**: Task state (goal, plan, step history, RAG hits) lives in Clicky's own app layer (`AgentStateManager`), not in either model's context. Every call to either model reconstructs the prompt fresh from that state. This makes it safe for oMLX to load and evict the 9B planner freely without forgetting context, paying only a short prefill cost on reload.
+**Single Resident 9B Model**: Uses `qwen3.5-9b` for triage, planning, and execution without model swapping. With `enableThinking: false` and strict token limits, latency per step remains under 2 seconds while benefiting from 9B's stronger reasoning and formatting adherence over 4B. The legacy 4B model is evicted on launch.
 
-**Strict Mutual Exclusion of 4B and 9B**: On 16GB Apple Silicon Macs, running `qwen3.5-4b` and `qwen3.5-9b` simultaneously causes unified memory pressure and Metal OOM failures. Clicky enforces that at most one generative LLM is pinned/resident at any time: the 4B actor is pinned during idle and execution, swapped to the 9B planner only during planning/replanning passes (unpin 4B -> unload 4B -> pin 9B -> plan -> unpin 9B -> unload 9B -> pin 4B), while `qwen3-embed` remains permanently resident. First-turn triage is handled directly by the 4B actor.
+**State Lives Outside the Model**: Task state (goal, plan, step history, RAG hits) lives in Clicky's own app layer (`AgentStateManager`), not in model context. Every call reconstructs the prompt fresh from that state.
 
 **Accessibility Tree First, Screenshot Fallback**: Rather than capturing multi-monitor screenshots for every step, Clicky traverses the active window's `AXUIElement` tree. This provides exact coordinates, labels, and roles with zero vision model latency. Screen capture is reserved solely as a fallback for non-accessible apps (games, custom canvases).
-
-**Three Models via oMLX**: A 4B resident model handles fast step-by-step tool grounding, a 9B model handles high-level planning and replanning on demand, and a 0.6B embedder powers instant local RAG lookups. Combined resident footprint stays well under 3GB, fitting comfortably on a 16GB Mac.
 
 **Pure Swift In-Process RAG**: The local vector store runs directly in-process via macOS system SQLite (`libsqlite3`) and calculates cosine similarity using Apple's Accelerate framework (`vDSP`). No external Python sidecars or external vector databases required.
 
@@ -76,11 +72,11 @@ User speaks (ctrl+option held)
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
 | `CompanionManager.swift` | ~1310 | Central state machine. Coordinates push-to-talk, intelligent triage, perception, RAG lookup, planner, actor loop, TTS, element pointing, spoken tool synthesis, and task dock. |
-| `OMLXClient.swift` | ~505 | HTTP client wrapper for oMLX OpenAI-compatible endpoints (`localhost:8000/v1`) and admin API. Enforces single LLM residency, swapping between 4B and 9B. |
+| `OMLXClient.swift` | ~475 | HTTP client wrapper for oMLX OpenAI-compatible endpoints (`localhost:8000/v1`) and admin API. Configured for single resident 9B model + embedder with no swapping. |
 | `PerceptionManager.swift` | ~380 | UI perception layer. Reads the `AXUIElement` hierarchy for active windows and falls back to ScreenCaptureKit screenshots only when permitted and necessary. |
 | `AgentStateManager.swift` | ~290 | External task state manager. Owns task goal, subgoals, compressed 1-line action history, stall detection, and failure counters outside model context. |
 | `AgentPlanner.swift` | ~190 | Planner orchestrator using `qwen3.5-9b`. Houses verbatim planner prompt, turns goal + screen state + RAG hints into ordered subgoals JSON with terminal-first preference. |
-| `AgentActorLoop.swift` | ~970 | Execution loop using resident `qwen3.5-4b`. Evaluates first-turn triage, executes atomic tool calls with terminal-first preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
+| `AgentActorLoop.swift` | ~980 | Execution loop using resident `qwen3.5-9b`. Evaluates first-turn triage, executes atomic tool calls with terminal-first preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
 | `AgentToolExecutor.swift` | ~555 | Executes agent tools: click (AXUIElement with CGEvent fallback), type, scroll, point, open_app, wait, done, escalate, shell commands via zsh with PATH resolution, and clipboard. |
 | `LocalVectorStore.swift` | ~270 | Pure Swift in-process SQLite vector store with Accelerate `vDSP` cosine similarity for trajectories and per-app UI maps. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
@@ -97,7 +93,7 @@ User speaks (ctrl+option held)
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
-| `DebugEventLogger.swift` | ~260 | Singleton terminal debug logger. Streams structured, emoji-prefixed, timestamped events to `~/Library/Logs/Clicky/debug.log` with in-place truncation and live synchronization. Run `tail -f ~/Library/Logs/Clicky/debug.log` to watch the full agent pipeline live. |
+| `DebugEventLogger.swift` | ~270 | Singleton terminal debug logger. Streams structured, emoji-prefixed, timestamped events to `~/Library/Logs/Clicky/debug.log` with in-place truncation and live synchronization. Run `tail -f ~/Library/Logs/Clicky/debug.log` to watch the full agent pipeline live. |
 | `memory-server/server.py` | ~80 | FastAPI sidecar that wraps `mem0ai` for persistent conversation memory. Exposes `/add`, `/search`, and `/reset` endpoints on localhost. |
 
 ## Build & Run

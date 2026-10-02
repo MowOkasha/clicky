@@ -3,9 +3,8 @@
 //  leanring-buddy
 //
 //  Client for talking to the local oMLX model server at http://localhost:8000/v1.
-//  oMLX provides an OpenAI-compatible API serving three models:
-//    - Actor / grounding: qwen3.5-4b (pinned, always resident)
-//    - Planner: qwen3.5-9b (on-demand, short TTL)
+//  oMLX provides an OpenAI-compatible API serving:
+//    - Generative Model (Planner & Actor): qwen3.5-9b (pinned, always resident)
 //    - Embedder: qwen3-embedding-0.6b (pinned, always resident)
 //
 
@@ -107,9 +106,9 @@ actor OMLXClient {
     private let urlSession: URLSession
 
     /// Model alias for the actor / execution model (pinned, resident).
-    static let actorModelAlias: String = "qwen3.5-4b"
+    static let actorModelAlias: String = "qwen3.5-9b"
 
-    /// Model alias for the planner model (loaded on demand, ~90s idle TTL).
+    /// Model alias for the planner model (pinned, resident).
     static let plannerModelAlias: String = "qwen3.5-9b"
 
     /// Model alias for the embedding model (pinned, resident).
@@ -412,49 +411,31 @@ actor OMLXClient {
         }
     }
 
-    /// Swaps memory residency from the 4B Actor to the 9B Planner.
-    /// Sequence: unpin 4B -> unload 4B -> pin 9B.
+    /// In single-model mode (9B only), the 9B model handles both planning and execution.
+    /// No swapping is performed, eliminating model reload latency.
     func swapToPlanner() async throws {
-        print("🔄 OMLXClient: Swapping from 4B Actor to 9B Planner...")
-        DebugEventLogger.shared.log(.modelSwap(fromModel: "qwen3.5-4b (actor)", toModel: "qwen3.5-9b (planner)"))
-        // 1. Unpin 4B
-        try await setPinStatus(modelId: OMLXClient.actorModelAlias, isPinned: false)
-        // 2. Unload 4B from memory
-        try await unloadModel(modelId: OMLXClient.actorModelAlias)
-        // 3. Pin 9B
         try await setPinStatus(modelId: OMLXClient.plannerModelAlias, isPinned: true)
-        // 4. Assert single LLM resident
-        try await assertSingleLLMResident(activeLLM: OMLXClient.plannerModelAlias)
-        print("✅ OMLXClient: Swapped to Planner (9B pinned, 4B evicted)")
     }
 
-    /// Swaps memory residency from the 9B Planner back to the 4B Actor.
-    /// Sequence: unpin 9B -> unload 9B -> pin 4B.
+    /// In single-model mode (9B only), the 9B model handles both planning and execution.
+    /// No swapping is performed, eliminating model reload latency.
     func swapToActor() async throws {
-        print("🔄 OMLXClient: Swapping from 9B Planner to 4B Actor...")
-        DebugEventLogger.shared.log(.modelSwap(fromModel: "qwen3.5-9b (planner)", toModel: "qwen3.5-4b (actor)"))
-        // 1. Unpin 9B
-        try await setPinStatus(modelId: OMLXClient.plannerModelAlias, isPinned: false)
-        // 2. Unload 9B from memory
-        try await unloadModel(modelId: OMLXClient.plannerModelAlias)
-        // 3. Pin 4B
         try await setPinStatus(modelId: OMLXClient.actorModelAlias, isPinned: true)
-        // 4. Assert single LLM resident
-        try await assertSingleLLMResident(activeLLM: OMLXClient.actorModelAlias)
-        print("✅ OMLXClient: Swapped to Actor (4B pinned, 9B evicted)")
     }
 
-    /// Enforces the idle baseline at startup: Embedder pinned, 4B Actor pinned, 9B Planner unpinned & unloaded.
+    /// Enforces the idle baseline at startup: Embedder pinned, 9B pinned, and legacy 4B unpinned & unloaded.
     func ensureIdleModelConfiguration() async {
-        print("🛡️ OMLXClient: Enforcing idle baseline model configuration...")
+        print("🛡️ OMLXClient: Enforcing single-model baseline (qwen3.5-9b pinned, 4b evicted)...")
+        // Ensure 4B model is evicted if left over from previous multi-model runs
+        try? await setPinStatus(modelId: "qwen3.5-4b", isPinned: false)
+        try? await unloadModel(modelId: "qwen3.5-4b")
+
+        // Ensure 9B and embedder are pinned
         try? await setPinStatus(modelId: OMLXClient.embedderModelAlias, isPinned: true)
-        try? await setPinStatus(modelId: OMLXClient.plannerModelAlias, isPinned: false)
-        try? await unloadModel(modelId: OMLXClient.plannerModelAlias)
         try? await setPinStatus(modelId: OMLXClient.actorModelAlias, isPinned: true)
-        try? await assertSingleLLMResident(activeLLM: OMLXClient.actorModelAlias)
     }
 
-    /// Runtime assertion: refuses to let both 4B and 9B be pinned or loaded simultaneously.
+    /// Runtime assertion: ensures 4B is not pinned and 9B is active.
     func assertSingleLLMResident(activeLLM: String) async throws {
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
         let modelSettingsURL = homeDirectory.appendingPathComponent(".omlx/model_settings.json")
@@ -464,23 +445,11 @@ actor OMLXClient {
             return
         }
 
-        let is4BPinned = (models[OMLXClient.actorModelAlias]?["is_pinned"] as? Bool) ?? false
-        let is9BPinned = (models[OMLXClient.plannerModelAlias]?["is_pinned"] as? Bool) ?? false
-
-        if is4BPinned && is9BPinned {
-            print("🚨 FATAL MUTUAL EXCLUSION VIOLATION: Both 4B and 9B are pinned! Enforcing correction...")
-            if activeLLM == OMLXClient.plannerModelAlias {
-                try? await setPinStatus(modelId: OMLXClient.actorModelAlias, isPinned: false)
-                try? await unloadModel(modelId: OMLXClient.actorModelAlias)
-            } else {
-                try? await setPinStatus(modelId: OMLXClient.plannerModelAlias, isPinned: false)
-                try? await unloadModel(modelId: OMLXClient.plannerModelAlias)
-            }
-            throw NSError(
-                domain: "OMLXClientError",
-                code: -999,
-                userInfo: [NSLocalizedDescriptionKey: "Mutual exclusion violation: 4B and 9B were both marked pinned. Inactive model was forcefully unpinned and unloaded."]
-            )
+        let is4BPinned = (models["qwen3.5-4b"]?["is_pinned"] as? Bool) ?? false
+        if is4BPinned {
+            print("🛡️ OMLXClient: Evicting legacy 4B model from pinned state...")
+            try? await setPinStatus(modelId: "qwen3.5-4b", isPinned: false)
+            try? await unloadModel(modelId: "qwen3.5-4b")
         }
     }
 

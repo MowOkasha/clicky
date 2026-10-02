@@ -2,7 +2,7 @@
 //  AgentActorLoop.swift
 //  leanring-buddy
 //
-//  The execution module running the resident qwen3.5-4b model on oMLX.
+//  The execution module running the resident qwen3.5-9b model on oMLX.
 //  Executes exactly one tool call per turn on the current subgoal.
 //  State is maintained entirely outside the model via AgentStateManager.
 //  Uses the actor system prompt from clicky-architecture.md verbatim.
@@ -24,7 +24,7 @@ struct ActorExecutionResult {
     let finalSummary: String
 }
 
-/// Orchestrates the execution loop using the resident qwen3.5-4b model.
+/// Orchestrates the execution loop using the resident qwen3.5-9b model.
 @MainActor
 class AgentActorLoop {
     
@@ -236,11 +236,13 @@ no extra commentary.
                 OMLXChatMessage(role: .user, text: userPromptText, base64ImageData: base64Images)
             ]
 
-            // 3. Invoke resident actor model qwen3.5-4b
+            // 3. Invoke resident actor model qwen3.5-9b
             let modelResponse = try await omlxClient.sendChatCompletionRequest(
                 model: OMLXClient.actorModelAlias,
                 messages: messages,
-                temperature: 0.0
+                temperature: 0.0,
+                maxTokens: 200,
+                enableThinking: false
             )
 
             // 4. Parse the single tool call (with automatic fast re-prompting on parse error)
@@ -260,7 +262,8 @@ no extra commentary.
                         model: OMLXClient.actorModelAlias,
                         messages: reminderMessages,
                         temperature: 0.1,
-                        maxTokens: 150
+                        maxTokens: 150,
+                        enableThinking: false
                     ) {
                         if let recoveredCall = parseActorToolCall(from: retryResponse) {
                             parsedToolCall = recoveredCall
@@ -414,7 +417,7 @@ no extra commentary.
         case needsPlan(reason: String)
     }
     
-    /// Evaluates the first turn of a new task using the 4B actor model.
+    /// Evaluates the first turn of a new task using the 9B model.
     /// Returns either a direct answer, a direct tool call, or a signal that planning is required.
     func evaluateTriageTurn(
         stateManager: AgentStateManager,
@@ -433,11 +436,13 @@ no extra commentary.
             OMLXChatMessage(role: .user, text: userPromptText, base64ImageData: base64Images)
         ]
         
-        print("🧠 AgentActorLoop: Evaluating triage on first turn with qwen3.5-4b...")
+        print("🧠 AgentActorLoop: Evaluating triage on first turn with qwen3.5-9b...")
         let modelResponse = try await omlxClient.sendChatCompletionRequest(
             model: OMLXClient.actorModelAlias,
             messages: messages,
-            temperature: 0.1
+            temperature: 0.1,
+            maxTokens: 250,
+            enableThinking: false
         )
         
         let cleanedText = stripThinkingTags(from: modelResponse.contentText)
@@ -792,7 +797,7 @@ no extra commentary.
 
     // MARK: - Spoken Answer & Failure Explanation Synthesis
 
-    /// Uses the resident 4B actor model to synthesize a natural spoken answer
+    /// Uses the resident 9B model to synthesize a natural spoken answer
     /// when a tool execution produces informative output (e.g. terminal ls/grep output, web search, etc.).
     func synthesizeSpokenAnswer(
         userGoal: String,
@@ -833,7 +838,8 @@ Speak conversationally: all lowercase, no markdown formatting, no bullet points,
                 model: OMLXClient.actorModelAlias,
                 messages: messages,
                 temperature: 0.1,
-                maxTokens: 120
+                maxTokens: 120,
+                enableThinking: false
             )
             let cleaned = stripThinkingTags(from: response.contentText).trimmingCharacters(in: .whitespacesAndNewlines)
             if !cleaned.isEmpty {
@@ -887,7 +893,8 @@ All lowercase, no markdown, no emojis.
                 model: OMLXClient.actorModelAlias,
                 messages: messages,
                 temperature: 0.1,
-                maxTokens: 80
+                maxTokens: 80,
+                enableThinking: false
             )
             let cleaned = stripThinkingTags(from: response.contentText).trimmingCharacters(in: .whitespacesAndNewlines)
             if !cleaned.isEmpty {

@@ -177,7 +177,7 @@ final class DebugEventLogger {
             }
 
         case .triageResult(let decision, let reason, let promptTokens, let completionTokens, let durationSeconds):
-            writeLine("\(timestamp) 🧠 TRIAGE     ─── Model: qwen3.5-4b | Tokens: \(promptTokens)→\(completionTokens) | \(formattedDuration(durationSeconds))")
+            writeLine("\(timestamp) 🧠 TRIAGE     ─── Model: qwen3.5-9b | Tokens: \(promptTokens)→\(completionTokens) | \(formattedDuration(durationSeconds))")
             if let reason = reason {
                 writeLine("           └── Decision: \(decision) (\"\(reason)\")")
             } else {
@@ -185,7 +185,9 @@ final class DebugEventLogger {
             }
 
         case .modelSwap(let fromModel, let toModel):
-            writeLine("\(timestamp) 🔄 MODEL_SWAP ─── \(fromModel) → \(toModel)")
+            if fromModel != toModel {
+                writeLine("\(timestamp) 🔄 MODEL_SWAP ─── \(fromModel) → \(toModel)")
+            }
 
         case .planGenerated(let subgoals, let promptTokens, let completionTokens, let durationSeconds):
             writeLine("\(timestamp) 📋 PLAN       ─── Model: qwen3.5-9b | Tokens: \(promptTokens)→\(completionTokens) | \(formattedDuration(durationSeconds)) | \(subgoals.count) subgoal(s)")
@@ -199,7 +201,7 @@ final class DebugEventLogger {
             writeLine("\(timestamp) 🚀 STEP \(stepNumber)     ─── Subgoal \(subgoalIndex)/\(totalSubgoals) (attempt \(attemptNumber)): \"\(subgoalDescription)\"")
 
         case .actorResponse(let toolName, let argumentsSummary, let promptTokens, let completionTokens, let durationSeconds):
-            writeLine("\(timestamp) 🧠 ACTOR      ─── Model: qwen3.5-4b | Tokens: \(promptTokens)→\(completionTokens) | \(formattedDuration(durationSeconds))")
+            writeLine("\(timestamp) 🧠 ACTOR      ─── Model: qwen3.5-9b | Tokens: \(promptTokens)→\(completionTokens) | \(formattedDuration(durationSeconds))")
             writeLine("           └── Tool: \(toolName)(\(argumentsSummary))")
 
         case .toolExecution(let toolName, let argumentsSummary, let result):
