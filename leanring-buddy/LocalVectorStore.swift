@@ -95,8 +95,18 @@ actor LocalVectorStore {
         );
         """
 
+        let createUserFactsTableSQL = """
+        CREATE TABLE IF NOT EXISTS user_facts (
+            id TEXT PRIMARY KEY,
+            fact TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            created_at REAL NOT NULL
+        );
+        """
+
         executeSQLStatement(createTrajectoriesTableSQL, on: db)
         executeSQLStatement(createUIMapsTableSQL, on: db)
+        executeSQLStatement(createUserFactsTableSQL, on: db)
     }
 
     private static func executeSQLStatement(_ sql: String, on db: OpaquePointer) {
@@ -245,6 +255,72 @@ actor LocalVectorStore {
         }
 
         return nil
+    }
+
+    /// Saves a persistent user preference or fact with its embedding vector.
+    func saveUserFact(
+        fact: String,
+        embedding: [Float]
+    ) {
+        guard let db = databasePointer else { return }
+
+        let sql = """
+        INSERT OR REPLACE INTO user_facts (id, fact, embedding, created_at)
+        VALUES (?, ?, ?, ?);
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(statement) }
+
+        let recordID = UUID().uuidString
+        let rawEmbeddingData = Data(bytes: embedding, count: embedding.count * MemoryLayout<Float>.size)
+
+        sqlite3_bind_text(statement, 1, (recordID as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(statement, 2, (fact as NSString).utf8String, -1, nil)
+        _ = rawEmbeddingData.withUnsafeBytes { rawBufferPointer in
+            sqlite3_bind_blob(statement, 3, rawBufferPointer.baseAddress, Int32(rawEmbeddingData.count), SQLITE_TRANSIENT)
+        }
+        sqlite3_bind_double(statement, 4, Date().timeIntervalSince1970)
+
+        if sqlite3_step(statement) == SQLITE_DONE {
+            print("💾 LocalVectorStore: Saved user fact: \"\(fact)\"")
+        }
+    }
+
+    /// Finds relevant user facts matching query embedding.
+    func findRelevantUserFacts(
+        queryEmbedding: [Float],
+        similarityThreshold: Float = 0.60,
+        maximumResultsLimit: Int = 2
+    ) -> [String] {
+        guard let db = databasePointer else { return [] }
+
+        let sql = "SELECT fact, embedding FROM user_facts;"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+
+        var scoredFacts: [(similarity: Float, fact: String)] = []
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let factText = String(cString: sqlite3_column_text(statement, 0))
+
+            guard let blobPointer = sqlite3_column_blob(statement, 1) else { continue }
+            let blobBytes = Int(sqlite3_column_bytes(statement, 1))
+            let floatCount = blobBytes / MemoryLayout<Float>.size
+
+            let floatPointer = blobPointer.bindMemory(to: Float.self, capacity: floatCount)
+            let storedVector = Array(UnsafeBufferPointer(start: floatPointer, count: floatCount))
+
+            let score = calculateCosineSimilarity(vectorA: queryEmbedding, vectorB: storedVector)
+            if score >= similarityThreshold {
+                scoredFacts.append((similarity: score, fact: factText))
+            }
+        }
+
+        scoredFacts.sort { $0.similarity > $1.similarity }
+        return scoredFacts.prefix(maximumResultsLimit).map { $0.fact }
     }
 
     // MARK: - Apple Accelerate Cosine Similarity

@@ -94,9 +94,15 @@ Rules:
     func generatePlan(
         stateManager: AgentStateManager,
         screenSummaryText: String,
-        fallbackScreenshots: [(data: Data, label: String)] = []
+        fallbackScreenshots: [(data: Data, label: String)] = [],
+        recentConversationSnippet: String? = nil,
+        lastTaskArtifactSummary: String? = nil
     ) async throws -> [AgentSubgoal] {
-        let userPrompt = stateManager.constructPlannerUserPrompt(screenSummaryText: screenSummaryText)
+        let userPrompt = stateManager.constructPlannerUserPrompt(
+            screenSummaryText: screenSummaryText,
+            recentConversationSnippet: recentConversationSnippet,
+            lastTaskArtifactSummary: lastTaskArtifactSummary
+        )
 
         let base64Images: [String] = fallbackScreenshots.map { $0.data.base64EncodedString() }
 

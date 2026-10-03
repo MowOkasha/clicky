@@ -78,7 +78,7 @@ User speaks (ctrl+option held)
 | `AgentPlanner.swift` | ~190 | Planner orchestrator using `qwen3.5-9b`. Houses verbatim planner prompt, turns goal + screen state + RAG hints into ordered subgoals JSON with terminal and AppleScript preference. |
 | `AgentActorLoop.swift` | ~1110 | Execution loop using resident `qwen3.5-9b`. Evaluates first-turn triage, executes atomic tool calls with terminal & AppleScript preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
 | `AgentToolExecutor.swift` | ~630 | Executes agent tools: run_applescript (direct osascript via stdin with safety timeout), run_terminal_command (zsh with PATH resolution), click (AXUIElement with CGEvent fallback), type, scroll, point, open_app, wait, done, escalate, and clipboard. |
-| `LocalVectorStore.swift` | ~270 | Pure Swift in-process SQLite vector store with Accelerate `vDSP` cosine similarity for trajectories and per-app UI maps. |
+| `LocalVectorStore.swift` | ~350 | Pure Swift in-process SQLite vector store with Accelerate `vDSP` cosine similarity for trajectories, per-app UI maps, and user facts. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
 | `CompanionPanelView.swift` | ~700 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~925 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, dock flight, element pointing with bezier arcs, and multi-monitor coordinate mapping. |
@@ -93,6 +93,7 @@ User speaks (ctrl+option held)
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `ObservationStore.swift` | ~65 | External working memory for Clicky. Offloads full tool outputs to disk in `~/Library/Caches/Clicky/obs/` and returns compact previews to keep context window bounded. |
+| `ConversationMemoryManager.swift` | ~100 | In-process conversational memory manager. Retains short-term verbatim exchanges and recent task artifact snapshots for follow-up triage and planner context. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
 | `DebugEventLogger.swift` | ~270 | Singleton terminal debug logger. Streams structured, emoji-prefixed, timestamped events to `~/Library/Logs/Clicky/debug.log` with in-place truncation and live synchronization. Run `tail -f ~/Library/Logs/Clicky/debug.log` to watch the full agent pipeline live. |
 

@@ -406,10 +406,14 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
     /// Returns either a direct answer, a direct tool call, or a signal that planning is required.
     func evaluateTriageTurn(
         stateManager: AgentStateManager,
-        perceptionResult: PerceptionResult
+        perceptionResult: PerceptionResult,
+        recentConversationSnippet: String? = nil,
+        lastTaskArtifactSummary: String? = nil
     ) async throws -> ActorTriageDecision {
         let userPromptText = stateManager.constructActorTriageUserPrompt(
-            currentUIStateText: perceptionResult.triageSummaryText
+            currentUIStateText: perceptionResult.triageSummaryText,
+            recentConversationSnippet: recentConversationSnippet,
+            lastTaskArtifactSummary: lastTaskArtifactSummary
         )
         
         let base64Images: [String] = perceptionResult.isScreenshotFallbackUsed

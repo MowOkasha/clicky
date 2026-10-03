@@ -588,10 +588,14 @@ final class CompanionManager: ObservableObject {
                         appName: initialPerception.frontmostApplicationName
                     )
                     let cachedUIMap = await localVectorStore.findAppUIMap(appName: initialPerception.frontmostApplicationName)
+                    let relevantUserFacts = await localVectorStore.findRelevantUserFacts(queryEmbedding: queryEmbedding)
 
                     retrievedRAGHints = pastTrajectories
                     if let uiMapHint = cachedUIMap {
                         retrievedRAGHints.append(uiMapHint)
+                    }
+                    for fact in relevantUserFacts {
+                        retrievedRAGHints.append("User Fact: \(fact)")
                     }
                     print("📚 CompanionManager: Retrieved \(retrievedRAGHints.count) RAG hint(s)")
                     DebugEventLogger.shared.log(.ragLookup(hintCount: retrievedRAGHints.count, error: nil))
@@ -606,10 +610,15 @@ final class CompanionManager: ObservableObject {
                     retrievedRAGHints: retrievedRAGHints
                 )
 
-                // Step 4: First-turn Triage via resident qwen3.5-9b
+                // Step 4: First-turn Triage via resident qwen3.5-9b (with short-term conversational context)
+                let recentDialogueContext = ConversationMemoryManager.shared.formatRecentConversationSnippet()
+                let lastTaskArtifactContext = ConversationMemoryManager.shared.formatLastTaskArtifactSummary()
+
                 let triageDecision = try await agentActorLoop.evaluateTriageTurn(
                     stateManager: agentStateManager,
-                    perceptionResult: initialPerception
+                    perceptionResult: initialPerception,
+                    recentConversationSnippet: recentDialogueContext,
+                    lastTaskArtifactSummary: lastTaskArtifactContext
                 )
                 guard !Task.isCancelled else { return }
 
@@ -618,6 +627,10 @@ final class CompanionManager: ObservableObject {
                     print("💬 CompanionManager: Direct answer from Actor: \"\(directAnswerText)\"")
                     voiceState = .responding
 
+                    ConversationMemoryManager.shared.recordExchange(
+                        userTranscript: transcript,
+                        assistantResponse: directAnswerText
+                    )
                     conversationHistory.append((
                         userTranscript: transcript,
                         assistantResponse: directAnswerText
@@ -673,6 +686,16 @@ final class CompanionManager: ObservableObject {
                     DebugEventLogger.shared.log(.tts(spokenText: spokenFeedback))
                     try? await localTTSClient.speakText(spokenFeedback)
 
+                    ConversationMemoryManager.shared.recordExchange(
+                        userTranscript: transcript,
+                        assistantResponse: spokenFeedback
+                    )
+                    ConversationMemoryManager.shared.recordTaskArtifact(
+                        goal: transcript,
+                        actionSummary: toolSummary,
+                        outputPreview: executionResult,
+                        targetApp: initialPerception.frontmostApplicationName
+                    )
                     conversationHistory.append((
                         userTranscript: transcript,
                         assistantResponse: spokenFeedback
@@ -709,13 +732,13 @@ final class CompanionManager: ObservableObject {
                         )
                     ]
 
-
-
                     // Invoke Planner (qwen3.5-9b on demand)
                     let plannedSubgoals = try await agentPlanner.generatePlan(
                         stateManager: agentStateManager,
                         screenSummaryText: initialPerception.formattedElementListText,
-                        fallbackScreenshots: initialPerception.fallbackScreenshots
+                        fallbackScreenshots: initialPerception.fallbackScreenshots,
+                        recentConversationSnippet: recentDialogueContext,
+                        lastTaskArtifactSummary: lastTaskArtifactContext
                     )
 
                     agentStateManager.updatePlannedSubgoals(with: plannedSubgoals)
@@ -844,7 +867,17 @@ final class CompanionManager: ObservableObject {
                     voiceState = .idle
                     scheduleTransientHideIfNeeded()
 
-                    // Save exchange
+                    // Save exchange and task artifact in memory
+                    ConversationMemoryManager.shared.recordExchange(
+                        userTranscript: transcript,
+                        assistantResponse: completionPhrase
+                    )
+                    ConversationMemoryManager.shared.recordTaskArtifact(
+                        goal: transcript,
+                        actionSummary: "Completed \(actorResult.totalStepsTaken) step(s)",
+                        outputPreview: actorResult.finalSummary,
+                        targetApp: initialPerception.frontmostApplicationName
+                    )
                     conversationHistory.append((
                         userTranscript: transcript,
                         assistantResponse: completionPhrase
@@ -932,6 +965,10 @@ final class CompanionManager: ObservableObject {
             scheduleTransientHideIfNeeded()
         }
 
+        ConversationMemoryManager.shared.recordExchange(
+            userTranscript: userTranscript,
+            assistantResponse: spokenErrorMessage
+        )
         conversationHistory.append((
             userTranscript: userTranscript,
             assistantResponse: spokenErrorMessage

@@ -238,8 +238,22 @@ class AgentStateManager: ObservableObject {
     /// Constructs a fresh user prompt for the Planner (qwen3.5-9b).
     ///
     /// - Parameter screenSummaryText: Summary of active application, window title, and visible elements.
-    func constructPlannerUserPrompt(screenSummaryText: String) -> String {
+    func constructPlannerUserPrompt(
+        screenSummaryText: String,
+        recentConversationSnippet: String? = nil,
+        lastTaskArtifactSummary: String? = nil
+    ) -> String {
         var sections: [String] = []
+
+        // Optional short-term conversation context (<120 tokens)
+        if let conversation = recentConversationSnippet, !conversation.isEmpty {
+            sections.append("Recent Dialogue:\n\(conversation)")
+        }
+
+        // Optional previous task outcome context (<60 tokens)
+        if let artifact = lastTaskArtifactSummary, !artifact.isEmpty {
+            sections.append("Previous Task Outcome:\n\(artifact)")
+        }
 
         // User goal
         sections.append("User Goal:\n\(userGoal)")
@@ -278,9 +292,23 @@ class AgentStateManager: ObservableObject {
     }
 
     /// Constructs user prompt for the initial triage turn of a new task (before subgoals exist).
-    /// Kept minimal (~50-100 tokens) to guarantee sub-second triage decisions and zero RAG pollution.
-    func constructActorTriageUserPrompt(currentUIStateText: String) -> String {
+    /// Kept minimal (~80-180 tokens) with optional recent dialogue or previous task outcome for follow-up continuity.
+    func constructActorTriageUserPrompt(
+        currentUIStateText: String,
+        recentConversationSnippet: String? = nil,
+        lastTaskArtifactSummary: String? = nil
+    ) -> String {
         var sections: [String] = []
+
+        // Optional short-term dialogue context (<120 tokens)
+        if let conversation = recentConversationSnippet, !conversation.isEmpty {
+            sections.append("Recent Dialogue:\n\(conversation)")
+        }
+
+        // Optional previous task outcome (<60 tokens)
+        if let artifact = lastTaskArtifactSummary, !artifact.isEmpty {
+            sections.append("Previous Task Outcome:\n\(artifact)")
+        }
 
         // User goal
         sections.append("User Request:\n\(userGoal)")
