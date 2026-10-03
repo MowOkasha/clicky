@@ -332,10 +332,29 @@ class AgentToolExecutor {
         return resultLines.joined(separator: "\n")
     }
 
-    /// Fetches a webpage and returns its text content, stripping HTML tags.
+    /// Fetches a webpage and returns its text content, or reads the active Safari tab if url is 'current' or omitted.
     private func executeReadWebpage(arguments: [String: Any]) async throws -> String {
-        guard let urlString = arguments["url"] as? String,
-              let url = URL(string: urlString) else {
+        let urlArg = (arguments["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // If no URL or 'current'/'safari' is specified, read directly from the frontmost Safari tab
+        if urlArg == nil || urlArg!.isEmpty || urlArg!.lowercased() == "current" || urlArg!.lowercased() == "active" || urlArg!.lowercased() == "safari" {
+            let safariScript = """
+            tell application "Safari"
+                if (count of windows) > 0 then
+                    set currentTab to current tab of front window
+                    set tabURL to URL of currentTab
+                    set tabTitle to name of currentTab
+                    set pageText to (do JavaScript "document.body ? document.body.innerText.slice(0, 4000) : ''" in currentTab)
+                    return "Title: " & tabTitle & "\nURL: " & tabURL & "\n\nContent:\n" & pageText
+                else
+                    return "Safari has no open windows."
+                end if
+            end tell
+            """
+            return try await runAppleScript(safariScript)
+        }
+
+        guard let urlString = urlArg, let url = URL(string: urlString) else {
             return "Error: missing or invalid 'url' argument"
         }
 
@@ -359,7 +378,7 @@ class AgentToolExecutor {
         let strippedText = stripHTML(from: htmlString)
 
         // Truncate to avoid overwhelming the model context
-        let maxCharacters = 8000
+        let maxCharacters = 4000
         if strippedText.count > maxCharacters {
             return String(strippedText.prefix(maxCharacters)) + "\n\n[Page truncated — \(strippedText.count) total characters]"
         }

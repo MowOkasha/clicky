@@ -139,7 +139,15 @@ class PerceptionManager {
         let axApplicationElement = AXUIElementCreateApplication(processIdentifier)
 
         // Find active window and title
-        let (activeWindowElement, activeWindowTitle) = resolveActiveWindow(for: axApplicationElement)
+        let (activeWindowElement, resolvedWindowTitle) = resolveActiveWindow(for: axApplicationElement)
+
+        var browserURLHint = ""
+        if applicationName.lowercased() == "safari" {
+            if let activeURL = fetchSafariActiveTabURL() {
+                browserURLHint = " [Current URL: \(activeURL)]"
+            }
+        }
+        let activeWindowTitle = resolvedWindowTitle + browserURLHint
 
         // Traverse the element tree starting from the active window (or whole app if window not found)
         let rootElementToTraverse = activeWindowElement ?? axApplicationElement
@@ -269,6 +277,24 @@ class PerceptionManager {
             "AXScrollArea", "AXSplitGroup", "AXGroup", "AXLayoutArea", "AXUnknown"
         ]
 
+        // Cap web view traversal: never explode full web page DOM into accessibility tree
+        if role == "AXWebArea" {
+            let elementID = "elem_\(discoveredElements.count + 1)"
+            let perceivedElement = PerceivedUIElement(
+                id: elementID,
+                role: role,
+                subrole: "AXWebArea",
+                label: "Web Page Content",
+                value: nil,
+                frame: copyElementFrame(axElement: element),
+                nativeIdentifier: "web_area",
+                isEnabled: true
+            )
+            discoveredElements.append(perceivedElement)
+            liveReferenceMap[elementID] = element
+            return
+        }
+
         // Check if this element is interactive or informational
         let isInterestingRole = !ignoredRoles.contains(role)
 
@@ -376,5 +402,26 @@ class PerceptionManager {
             print("⚠️ PerceptionManager: Failed to capture fallback screenshots: \(error)")
             return []
         }
+    }
+
+    // MARK: - Browser Perception Helpers
+
+    private func fetchSafariActiveTabURL() -> String? {
+        let script = """
+        tell application "Safari"
+            if (count of windows) > 0 then
+                set currentTab to current tab of front window
+                return (URL of currentTab as text)
+            end if
+        end tell
+        """
+        var errorDict: NSDictionary?
+        if let appleScript = NSAppleScript(source: script) {
+            let result = appleScript.executeAndReturnError(&errorDict)
+            if let urlString = result.stringValue, !urlString.isEmpty {
+                return urlString
+            }
+        }
+        return nil
     }
 }
