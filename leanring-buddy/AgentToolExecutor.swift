@@ -58,8 +58,6 @@ class AgentToolExecutor {
                 result = try await executeSearchWeb(arguments: arguments)
             case "read_webpage":
                 result = try await executeReadWebpage(arguments: arguments)
-            case "take_screenshot":
-                result = await executeTakeScreenshot()
             case "list_running_apps":
                 result = executeListRunningApps()
             case "read_clipboard":
@@ -383,70 +381,7 @@ class AgentToolExecutor {
         return "Typed text: \(text.prefix(100))\(text.count > 100 ? "..." : "")"
     }
 
-    /// Captures a fresh screenshot of all screens and returns a plain text
-    /// description by re-running the model's built-in vision on the new capture.
-    /// The actual image data is returned as a side channel via the stored property
-    /// so the AgentLoop can attach it to the next model call.
-    private func executeTakeScreenshot() async -> String {
-        do {
-            let captures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-            if captures.isEmpty {
-                return "Error: could not capture any screens"
-            }
 
-            let screenList = captures.enumerated().map { index, capture in
-                "Screen \(index + 1): \(capture.label) (\(capture.screenshotWidthInPixels)×\(capture.screenshotHeightInPixels)px)"
-            }.joined(separator: "\n")
-
-            // Signal to the AgentLoop that fresh screenshots are available.
-            // The loop will attach these as images on the next model call so
-            // the model can visually inspect the new state.
-            self.lastCapturedScreenshots = captures
-
-            return "Screenshot captured. Screens:\n\(screenList)\n\nI can now see the current state of your screen in the next message."
-        } catch {
-            return "Error capturing screenshot: \(error.localizedDescription)"
-        }
-    }
-
-    /// Returns a list of currently running applications.
-    private func executeListRunningApps() -> String {
-        let runningApps = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }  // Only visible apps
-            .compactMap { $0.localizedName }
-            .sorted()
-
-        if runningApps.isEmpty {
-            return "No running applications found"
-        }
-
-        return "Running applications:\n" + runningApps.map { "- \($0)" }.joined(separator: "\n")
-    }
-
-    /// Reads text content from the clipboard.
-    private func executeReadClipboard() -> String {
-        guard let clipboardText = NSPasteboard.general.string(forType: .string) else {
-            return "Clipboard is empty or contains non-text content"
-        }
-        return "Clipboard contents:\n\(clipboardText)"
-    }
-
-    /// Writes text to the clipboard.
-    private func executeWriteClipboard(arguments: [String: Any]) throws -> String {
-        guard let text = arguments["text"] as? String else {
-            return "Error: missing 'text' argument"
-        }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        return "Copied to clipboard: \(text.prefix(100))\(text.count > 100 ? "..." : "")"
-    }
-
-    // MARK: - Screenshot Side Channel
-
-    /// The most recently captured screenshots from a take_screenshot tool call.
-    /// AgentLoop checks this after executing take_screenshot and includes the
-    /// images in the next model call so the model can visually verify the result.
-    var lastCapturedScreenshots: [CompanionScreenCapture] = []
 
     // MARK: - Private Helpers
 
@@ -479,7 +414,17 @@ class AgentToolExecutor {
 
                 do {
                     try process.run()
+
+                    // Safety timeout: 15 seconds to prevent runaway or hanging shell commands
+                    let timeoutTask = Task {
+                        try? await Task.sleep(nanoseconds: 15_000_000_000)
+                        if process.isRunning {
+                            process.terminate()
+                        }
+                    }
+
                     process.waitUntilExit()
+                    timeoutTask.cancel()
 
                     let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
                     let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
@@ -492,7 +437,13 @@ class AgentToolExecutor {
                         combined += stderr.isEmpty ? "" : (combined.isEmpty ? stderr : "\n[stderr]: \(stderr)")
                     }
 
-                    continuation.resume(returning: combined.trimmingCharacters(in: .newlines))
+                    let trimmedCombined = combined.trimmingCharacters(in: .newlines)
+                    if process.terminationStatus != 0 {
+                        let errorDetail = trimmedCombined.isEmpty ? "Shell command exited with status \(process.terminationStatus)" : trimmedCombined
+                        continuation.resume(returning: "Error (exit code \(process.terminationStatus)): \(errorDetail)")
+                    } else {
+                        continuation.resume(returning: trimmedCombined)
+                    }
                 } catch {
                     continuation.resume(throwing: error)
                 }

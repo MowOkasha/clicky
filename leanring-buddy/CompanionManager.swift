@@ -91,9 +91,6 @@ final class CompanionManager: ObservableObject {
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
-    private lazy var ollamaAPI: OllamaAPI = {
-        return OllamaAPI(model: selectedModel)
-    }()
 
     private lazy var localTTSClient: LocalTTSClient = {
         return LocalTTSClient()
@@ -125,18 +122,8 @@ final class CompanionManager: ObservableObject {
         )
     }()
 
-    /// The agentic loop orchestrator — runs think → act → observe until the model
-    /// produces a final text response or the iteration limit is reached.
-    private lazy var agentLoop: AgentLoop = {
-        return AgentLoop(ollamaAPI: ollamaAPI, toolExecutor: agentToolExecutor, maxIterations: 10)
-    }()
-
-    /// Conversation history so Claude remembers prior exchanges within a session.
-    /// Each entry is the user's transcript and Claude's response.
+    /// Conversation history for multi-turn interactions.
     private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
-    
-    /// Unsaved memory exchanges waiting to be sent to Mem0 in a batch to save LLM context/processing overhead.
-    private var pendingMemories: [(userTranscript: String, assistantResponse: String)] = []
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
@@ -161,21 +148,6 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    /// The model used for all vision, reasoning, and tool calling. Persisted to UserDefaults.
-    /// Default is qwen2.5vl:7b — a unified multimodal vision-language model.
-    @Published var selectedModel: String = {
-        let saved = UserDefaults.standard.string(forKey: "selectedClaudeModel")
-        if saved == nil || saved == "qwen3.5:9b-q5" || saved == "qwen2.5-vl:7b" {
-            return "qwen2.5vl:7b"
-        }
-        return saved ?? "qwen2.5vl:7b"
-    }()
-
-    func setSelectedModel(_ model: String) {
-        selectedModel = model
-        UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
-        ollamaAPI.model = model
-    }
 
     /// User preference for whether the Clicky cursor should be shown.
     /// When toggled off, the overlay is hidden and push-to-talk is disabled.
@@ -218,9 +190,6 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
-        // Pre-warm local Ollama API by making a dummy connection
-        // (Currently unused for local, but kept for future structure)
-        _ = ollamaAPI
 
         // Enforce idle model baseline in oMLX: Embedder and 9B pinned, legacy 4B evicted
         Task {
@@ -342,8 +311,7 @@ final class CompanionManager: ObservableObject {
         audioPowerCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
-        // Fire-and-forget on quit — the process lives long enough for the HTTP call to complete
-        Task { await flushPendingMemories() }
+
     }
 
     func refreshAllPermissions() {
@@ -575,41 +543,7 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    // MARK: - Companion Prompt
 
-    private static let companionVoiceResponseSystemPrompt = """
-    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see screenshots of their screen when needed. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
-
-    rules:
-    - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
-    - all lowercase, casual, warm. no emojis.
-    - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
-    - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
-    - if the user's question relates to what's on their screen, reference specific things from the screenshots.
-    - if the screen doesn't seem relevant to their question, just answer the question directly.
-    - you can help with anything — coding, writing, general knowledge, brainstorming, executing multi-step tasks.
-    - never say "simply" or "just".
-    - don't read out code verbatim. describe what the code does or what needs to change conversationally.
-    - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
-    - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained.
-
-    element pointing:
-    you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing.
-
-    don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen.
-
-    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the origin (0,0) is the top-left corner of the screenshot, x increases rightward, y increases downward.
-
-    format: [POINT:x,y:label] where x,y are the integer pixel coordinates on the screenshot, and label is a short 1-3 word description of the element. if the element is on a secondary screen, append :screenN where N matches the screen number (e.g. :screen2).
-
-    if pointing wouldn't help, or if no screenshot is present, append [POINT:none].
-
-    examples:
-    - user asks where the Projects folder is: "that's the Projects folder right there on your desktop. [POINT:450,320:Projects folder]"
-    - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. [POINT:none]"
-    - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c. [POINT:285,11:source control]"
-    - element is on screen 2: "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
-    """
 
     // MARK: - AI Response Pipeline
 
@@ -775,14 +709,7 @@ final class CompanionManager: ObservableObject {
                         )
                     ]
 
-                    // Activate Planner (qwen3.5-9b resident)
-                    try await omlxClient.swapToPlanner()
-                    guard !Task.isCancelled else {
-                        try? await omlxClient.swapToActor()
-                        isAgentTaskRunning = false
-                        agentTaskDockWindowManager.hideDock()
-                        return
-                    }
+
 
                     // Invoke Planner (qwen3.5-9b on demand)
                     let plannedSubgoals = try await agentPlanner.generatePlan(
@@ -802,8 +729,6 @@ final class CompanionManager: ObservableObject {
                         )
                     }
 
-                    // Activate Actor (qwen3.5-9b resident)
-                    try await omlxClient.swapToActor()
                     guard !Task.isCancelled else {
                         isAgentTaskRunning = false
                         agentTaskDockWindowManager.hideDock()
@@ -845,14 +770,6 @@ final class CompanionManager: ObservableObject {
                                 AgentTaskProgressStep(toolName: "replan", summary: "Replanning: \(failureReason)", isComplete: false)
                             )
 
-                            // SWAP TO PLANNER for replanning
-                            do {
-                                try await self.omlxClient.swapToPlanner()
-                            } catch {
-                                print("⚠️ CompanionManager: Failed to swap to planner: \(error)")
-                                return false
-                            }
-
                             let freshPerception = await self.perceptionManager.captureCurrentScreenState(
                                 allowScreenshotFallback: true
                             )
@@ -861,13 +778,6 @@ final class CompanionManager: ObservableObject {
                                 screenSummaryText: freshPerception.formattedElementListText,
                                 fallbackScreenshots: freshPerception.fallbackScreenshots
                             )
-
-                            // SWAP BACK TO ACTOR to resume execution
-                            do {
-                                try await self.omlxClient.swapToActor()
-                            } catch {
-                                print("⚠️ CompanionManager: Failed to swap back to actor: \(error)")
-                            }
 
                             if let newSubgoals = replannedSubgoals {
                                 self.agentStateManager.updatePlannedSubgoals(with: newSubgoals)
@@ -943,26 +853,16 @@ final class CompanionManager: ObservableObject {
                         conversationHistory.removeFirst(conversationHistory.count - 10)
                     }
 
-                    // Flush memories to Mem0
-                    pendingMemories.append((userTranscript: transcript, assistantResponse: completionPhrase))
-                    if pendingMemories.count >= 5 {
-                        await flushPendingMemories()
-                    }
+                    // Exchange recorded in conversation history
                 }
             } catch is CancellationError {
                 isAgentTaskRunning = false
                 agentTaskDockWindowManager.hideDock()
-                Task {
-                    await omlxClient.ensureIdleModelConfiguration()
-                }
             } catch {
                 print("Companion response error: \(error)")
                 isAgentTaskRunning = false
                 agentTaskDockWindowManager.hideDock()
                 handleCompanionPipelineError(error, userTranscript: transcript)
-                Task {
-                    await omlxClient.ensureIdleModelConfiguration()
-                }
             }
 
             if !Task.isCancelled {
@@ -1254,20 +1154,27 @@ final class CompanionManager: ObservableObject {
                 let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
                 let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
 
-                // Send screenshot directly to qwen2.5vl:7b (unified vision + reasoning)
-                // No separate vision model call needed -- the single model sees the screen.
-                let agentResult = try await agentLoop.run(
-                    systemPrompt: Self.onboardingDemoSystemPrompt,
-                    initialImages: labeledImages,
-                    conversationHistory: [],
-                    userPrompt: "look around my screen and find something interesting to point at",
-                    onTextChunk: { _ in },
-                    onToolCallStarted: nil
+                // Send screenshot directly to resident qwen3.5-9b on oMLX
+                let base64Image = cursorScreenCapture.imageData.base64EncodedString()
+                let messages: [OMLXChatMessage] = [
+                    OMLXChatMessage(role: .system, text: Self.onboardingDemoSystemPrompt),
+                    OMLXChatMessage(
+                        role: .user,
+                        text: "look around my screen and find something interesting to point at" + dimensionInfo,
+                        base64ImageData: [base64Image]
+                    )
+                ]
+
+                let modelResponse = try await omlxClient.sendChatCompletionRequest(
+                    model: OMLXClient.actorModelAlias,
+                    messages: messages,
+                    temperature: 0.2,
+                    maxTokens: 100,
+                    enableThinking: false
                 )
 
-                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
-
-                let parseResult = Self.parsePointingCoordinates(from: agentResult.finalResponseText)
+                let cleanedText = Self.stripThinkingTags(from: modelResponse.contentText)
+                let parseResult = Self.parsePointingCoordinates(from: cleanedText)
 
                 guard let pointCoordinate = parseResult.coordinate else {
                     print("Onboarding demo: no element to point at")
@@ -1296,17 +1203,7 @@ final class CompanionManager: ObservableObject {
                 print("Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" -- \"\(parseResult.spokenText)\"")
             } catch {
                 print("Onboarding demo error: \(error)")
-                await OllamaModelMemoryManager.shared.unloadModel(ollamaAPI.model)
             }
         }
-    }
-    
-    /// Flushes any pending memories to Mem0 immediately.
-    private func flushPendingMemories() async {
-        guard !pendingMemories.isEmpty else { return }
-        print("🧠 Flushing \(pendingMemories.count) pending memories to Mem0...")
-        let memoriesToFlush = pendingMemories
-        pendingMemories.removeAll()
-        await Mem0Client.shared.addConversationsBatch(exchanges: memoriesToFlush)
     }
 }

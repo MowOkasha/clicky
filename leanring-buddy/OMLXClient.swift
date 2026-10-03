@@ -386,41 +386,16 @@ actor OMLXClient {
             print("⚠️ OMLXClient: Network error setting pin for \(modelId): \(error)")
         }
 
-        // Also persist directly to disk (~/.omlx/model_settings.json) as guaranteed fallback
-        persistPinStatusToDisk(modelId: modelId, isPinned: isPinned)
-    }
-
-    /// Explicitly unloads an idle model from oMLX via POST /admin/api/models/{model_id}/unload.
-    func unloadModel(modelId: String) async throws {
-        await ensureAdminSession()
-
-        let unloadURL = adminBaseURL.appendingPathComponent("models").appendingPathComponent(modelId).appendingPathComponent("unload")
-        var request = URLRequest(url: unloadURL)
-        request.httpMethod = "POST"
-        if let apiKey = resolveAPIKey() {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-
-        do {
-            let (_, response) = try await urlSession.data(for: request)
-            if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 400 {
-                print("🧹 OMLXClient: Unloaded \(modelId) from memory")
-            }
-        } catch {
-            print("⚠️ OMLXClient: Network error unloading \(modelId): \(error)")
-        }
-    }
-
     /// In single-model mode (9B only), the 9B model handles both planning and execution.
     /// No swapping is performed, eliminating model reload latency.
     func swapToPlanner() async throws {
-        try await setPinStatus(modelId: OMLXClient.plannerModelAlias, isPinned: true)
+        // No-op: single resident 9B model
     }
 
     /// In single-model mode (9B only), the 9B model handles both planning and execution.
     /// No swapping is performed, eliminating model reload latency.
     func swapToActor() async throws {
-        try await setPinStatus(modelId: OMLXClient.actorModelAlias, isPinned: true)
+        // No-op: single resident 9B model
     }
 
     /// Enforces the idle baseline at startup: Embedder pinned, 9B pinned, and legacy 4B unpinned & unloaded.
@@ -434,41 +409,5 @@ actor OMLXClient {
         try? await setPinStatus(modelId: OMLXClient.embedderModelAlias, isPinned: true)
         try? await setPinStatus(modelId: OMLXClient.actorModelAlias, isPinned: true)
     }
-
-    /// Runtime assertion: ensures 4B is not pinned and 9B is active.
-    func assertSingleLLMResident(activeLLM: String) async throws {
-        let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
-        let modelSettingsURL = homeDirectory.appendingPathComponent(".omlx/model_settings.json")
-        guard let data = try? Data(contentsOf: modelSettingsURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let models = json["models"] as? [String: [String: Any]] else {
-            return
-        }
-
-        let is4BPinned = (models["qwen3.5-4b"]?["is_pinned"] as? Bool) ?? false
-        if is4BPinned {
-            print("🛡️ OMLXClient: Evicting legacy 4B model from pinned state...")
-            try? await setPinStatus(modelId: "qwen3.5-4b", isPinned: false)
-            try? await unloadModel(modelId: "qwen3.5-4b")
-        }
-    }
-
-    private func persistPinStatusToDisk(modelId: String, isPinned: Bool) {
-        let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
-        let modelSettingsURL = homeDirectory.appendingPathComponent(".omlx/model_settings.json")
-        guard let data = try? Data(contentsOf: modelSettingsURL),
-              var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              var models = json["models"] as? [String: [String: Any]] else {
-            return
-        }
-
-        var modelDict = models[modelId] ?? [:]
-        modelDict["is_pinned"] = isPinned
-        models[modelId] = modelDict
-        json["models"] = models
-
-        if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-            try? updatedData.write(to: modelSettingsURL)
-        }
-    }
 }
+

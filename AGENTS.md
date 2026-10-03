@@ -94,24 +94,14 @@ User speaks (ctrl+option held)
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
 | `DebugEventLogger.swift` | ~270 | Singleton terminal debug logger. Streams structured, emoji-prefixed, timestamped events to `~/Library/Logs/Clicky/debug.log` with in-place truncation and live synchronization. Run `tail -f ~/Library/Logs/Clicky/debug.log` to watch the full agent pipeline live. |
-| `memory-server/server.py` | ~80 | FastAPI sidecar that wraps `mem0ai` for persistent conversation memory. Exposes `/add`, `/search`, and `/reset` endpoints on localhost. |
 
 ## Build & Run
 
 ```bash
-# Terminal 1: Start Ollama
-ollama serve
+# Terminal 1: Ensure oMLX is running at localhost:8000
+# (serves pinned resident qwen3.5-9b and qwen3-embed)
 
-# Terminal 2: Pull and start the unified multimodal vision + reasoning model
-ollama run qwen2.5vl:7b
-ollama pull nomic-embed-text
-
-# Terminal 3: Start the Mem0 memory sidecar (in a separate terminal, keep running)
-cd memory-server
-uv pip install ollama -e .
-uv run python server.py
-
-# Terminal 4: Open in Xcode
+# Terminal 2: Open in Xcode
 open leanring-buddy.xcodeproj
 
 # Select the leanring-buddy scheme, set signing team, Cmd+R to build and run
