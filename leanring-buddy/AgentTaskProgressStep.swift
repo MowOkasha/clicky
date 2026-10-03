@@ -47,6 +47,14 @@ public struct AgentTaskProgressStep: Identifiable, Sendable {
             }
             return "Running terminal command"
 
+        case "run_applescript":
+            if let script = (arguments["script"] as? String) ?? (arguments["code"] as? String), !script.isEmpty {
+                let singleLine = script.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\n", with: " ")
+                let display = singleLine.count > 35 ? "\(singleLine.prefix(32))..." : singleLine
+                return "AppleScript: \(display)"
+            }
+            return "Running AppleScript"
+
         case "open_url":
             if let urlString = arguments["url"] as? String, !urlString.isEmpty {
                 if let url = URL(string: urlString), let host = url.host {

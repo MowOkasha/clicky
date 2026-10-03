@@ -721,7 +721,7 @@ final class CompanionManager: ObservableObject {
                     print("⚡️ Direct tool executed: \(toolSummary) -> \(executionResult)")
 
                     let spokenFeedback: String
-                    let informationalTools = ["run_terminal_command", "search_web", "read_webpage", "read_clipboard", "list_running_apps"]
+                    let informationalTools = ["run_terminal_command", "run_applescript", "search_web", "read_webpage", "read_clipboard", "list_running_apps"]
                     if informationalTools.contains(toolCall.toolName) {
                         // For terminal commands and informational tools, synthesize a natural spoken response answering the user's question
                         spokenFeedback = await agentActorLoop.synthesizeSpokenAnswer(

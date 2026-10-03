@@ -34,8 +34,8 @@ Rules:
 1. RESPECT USER-SPECIFIED APPLICATIONS & BROWSERS:
    If the user specifically asks to open, find, or use an application (e.g. "open on Safari", "find that on Safari", "paste into Pages", "write in Notes"):
    You MUST include opening and using that application!
-   - For Safari: e.g. "open Safari to page: run_terminal_command(\"open -a Safari 'https://en.wikipedia.org/wiki/Topic_Name'\")"
-   - For Pages: e.g. "create Pages document: run_terminal_command(\"osascript -e 'tell application \\\"Pages\\\" to make new document with properties {body text:\\\"...\\\"}'\")" or open a generated document in Pages.
+   - For Safari: e.g. "open Safari to page: run_applescript(\"tell application \\\"Safari\\\" to open location \\\"https://en.wikipedia.org/wiki/Topic_Name\\\"\")" or run_terminal_command("open -a Safari 'https://en.wikipedia.org/wiki/Topic_Name'")
+   - For Pages: e.g. "create Pages document with summary: run_applescript" or open a generated document in Pages.
 
 2. PIPING TOOL OUTPUT STRAIGHT TO FILES (NEVER RETYPE LONG TEXT):
    When fetching research or web data, NEVER plan subgoals where the model has to manually copy, echo, or retype article text into terminal commands.
@@ -52,12 +52,22 @@ Rules:
    - Step 2: Fetch full text directly to /tmp/topic_raw.txt via curl and python.
    - Step 3: Summarize /tmp/topic_raw.txt into /tmp/summary.txt using a clean python script:
      python3 -c "import sys; text=open('/tmp/topic_raw.txt').read()[:4000]; paragraphs=[p.strip() for p in text.split('\n') if len(p.strip()) > 50][:4]; open('/tmp/summary.txt','w').write('\n\n'.join(paragraphs))"
-   - Step 4: Create new Pages document with the summary:
-     osascript -e 'set txt to read POSIX file "/tmp/summary.txt" as «class utf8»' -e 'tell application "Pages"' -e 'activate' -e 'set doc to make new document' -e 'set body text of doc to txt' -e 'end tell'
+   - Step 4: Create new Pages document with the summary via run_applescript:
+     tell application "Pages" to activate
+     set doc to make new document
+     set body text of doc to (read POSIX file "/tmp/summary.txt" as «class utf8»)
      (Or convert via textutil: textutil -convert docx /tmp/summary.txt -output ~/Desktop/Summary.docx && open -a Pages ~/Desktop/Summary.docx)
    - Step 5: Verify the summary exists and is non-empty: [ -s /tmp/summary.txt ].
 
-4. GENERAL PLANNING:
+4. APPLESCRIPT AUTOMATION (run_applescript):
+   PREFER run_applescript over GUI clicking for scriptable macOS apps:
+   - Pages: make new document, set body text, export
+   - Safari: open location, read page text (do JavaScript), get active tab URL
+   - Notes: make new note, get notes list
+   - Reminders: make new reminder
+   - Music: get current track, control playback
+
+5. GENERAL PLANNING:
    - Prefer terminal commands over manual clicking for file operations (ls, open, cat, find).
    - When replanning, plan ONLY the remaining subgoals needed to complete the user goal. Do not repeat completed subgoals.
    - Output ONLY valid JSON, no prose, in this exact shape:

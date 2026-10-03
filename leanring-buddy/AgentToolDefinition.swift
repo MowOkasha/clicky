@@ -39,6 +39,7 @@ extension AgentToolDefinition {
     static let allTools: [AgentToolDefinition] = [
         openApp,
         runTerminalCommand,
+        runAppleScript,
         openURL,
         searchWeb,
         readWebpage,
@@ -83,6 +84,21 @@ extension AgentToolDefinition {
                 ] as [String: Any]
             ] as [String: Any],
             "required": ["command"]
+        ]
+    )
+
+    static let runAppleScript = AgentToolDefinition(
+        name: "run_applescript",
+        description: "Executes AppleScript source code directly via macOS osascript. Use for deep, reliable automation of scriptable Mac applications like Pages, Safari, Notes, Reminders, Finder, Mail, Music, and System Events.",
+        parameters: [
+            "type": "object",
+            "properties": [
+                "script": [
+                    "type": "string",
+                    "description": "The AppleScript code to execute directly."
+                ] as [String: Any]
+            ] as [String: Any],
+            "required": ["script"]
         ]
     )
 

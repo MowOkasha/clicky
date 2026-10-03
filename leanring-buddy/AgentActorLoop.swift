@@ -64,16 +64,21 @@ PATH A — DIRECT ANSWER (just reply with text, no tool call):
 
 PATH B — DIRECT TOOL (emit a single tool call):
   Use this when the task is an action achievable right now:
-  - Terminal commands: ALWAYS PREFER running a terminal command (run_terminal_command)
-    for anything involving checking files, finding files, listing directory contents
-    (e.g. on Desktop, in Downloads, in Documents), checking git status, running scripts,
-    or checking system/process info.
+  - Terminal commands & AppleScript:
+    * ALWAYS PREFER run_terminal_command for checking files, finding files, listing directory contents
+      (e.g. on Desktop, in Downloads, in Documents), checking git status, running scripts, or checking system info.
+    * ALWAYS PREFER run_applescript for automating scriptable Mac apps (Pages, Safari, Notes, Reminders, Finder, Mail, Music, System Events)
+      directly without relying on fragile GUI clicking.
     Examples:
       - "Can you see the position file on my desktop?" -> run_terminal_command("ls ~/Desktop")
       - "What files are on my desktop?" -> run_terminal_command("ls ~/Desktop")
       - "Open the position file on my desktop" -> run_terminal_command("open ~/Desktop/position.pages")
       - "Check what is inside notes.txt" -> run_terminal_command("cat ~/Desktop/notes.txt")
       - "Check if there's a pdf in my downloads" -> run_terminal_command("find ~/Downloads -maxdepth 2 -iname '*.pdf'")
+      - "What tab is open in Safari?" -> run_applescript("tell application \"Safari\" to return (URL of current tab of front window & \" - \" & name of current tab of front window)")
+      - "Create a new Pages document with text Hello" -> run_applescript("tell application \"Pages\"\nactivate\nset doc to make new document\nset body text of doc to \"Hello\"\nend tell")
+      - "Add a reminder to buy milk" -> run_applescript("tell application \"Reminders\" to make new reminder with properties {name:\"Buy milk\"}")
+      - "What song is playing?" -> run_applescript("tell application \"Music\" to return (name of current track & \" by \" & artist of current track)")
       - "Is Docker running?" -> run_terminal_command("docker ps")
       - "Check git status" -> run_terminal_command("git status")
   - UI actions: "click send", "open safari", "close this window", "scroll down".
@@ -87,8 +92,8 @@ PATH C — NEEDS PLAN (respond with the JSON below and nothing else):
   Examples: "send an email to John about the meeting", "create a new
   Xcode project and add a file", "find the cheapest flight to London".
   NOTE: If checking a file or directory can be done with a terminal
-  command (like ls ~/Desktop or find), DO NOT choose Path C. Use Path B with
-  run_terminal_command instead.
+  command (like ls ~/Desktop or find) or an AppleScript, DO NOT choose Path C. Use Path B with
+  run_terminal_command or run_applescript instead.
 
 IMPORTANT: When in doubt between A and C, prefer A (direct answer).
 Only choose C when you are certain the user wants you to physically
@@ -106,33 +111,55 @@ You will receive:
 
 Rules:
 - Choose exactly ONE tool call per turn. Never describe multiple steps.
-- TERMINAL FIRST: Whenever checking for files (e.g. on Desktop, in Downloads, in home directory),
-  inspecting directories, running scripts, or checking system state, ALWAYS use
-  run_terminal_command instead of clicking windows or guessing from screenshots.
-- BACKGROUND EXECUTION: run_terminal_command and open_app execute independently in the background
+- TERMINAL & APPLESCRIPT FIRST:
+  * Whenever checking for files (e.g. on Desktop, in Downloads, in home directory), inspecting directories, running scripts, or checking system state, ALWAYS use run_terminal_command instead of clicking windows or guessing from screenshots.
+  * Whenever automating scriptable macOS applications (Pages, Safari, Notes, Reminders, Finder, Mail, Music), ALWAYS PREFER run_applescript over manual coordinate clicking or keyboard navigation.
+- BACKGROUND EXECUTION: run_terminal_command, run_applescript, and open_app execute independently in the background
   regardless of what app or window is frontmost or visible! You DO NOT need to be in an app or have
-  it focused to open it or run shell commands. NEVER call escalate just because the target app is not
+  it focused to open it, script it, or run commands. NEVER call escalate just because the target app is not
   frontmost or you see Terminal on screen. To open or switch to an app, simply call open_app("AppName")
   or run_terminal_command("open -a AppName").
+- APPLESCRIPT RECIPES FOR COMMON MAC APPS:
+  * Pages:
+    - Create new document and populate text from file:
+      run_applescript("set txt to read POSIX file \"/tmp/summary.txt\" as «class utf8»\ntell application \"Pages\"\nactivate\nset doc to make new document\nset body text of doc to txt\nend tell")
+    - Create new blank document with inline text:
+      run_applescript("tell application \"Pages\"\nactivate\nset doc to make new document\nset body text of doc to \"Document text here\"\nend tell")
+    - Set or append text to front document:
+      run_applescript("tell application \"Pages\" to set body text of front document to \"New text\"")
+  * Safari:
+    - Open URL: run_applescript("tell application \"Safari\" to open location \"https://example.com\"")
+    - Read active tab URL and title: run_applescript("tell application \"Safari\" to return (URL of current tab of front window & \" - \" & name of current tab of front window)")
+    - Read page text content via JavaScript:
+      run_applescript("tell application \"Safari\" to do JavaScript \"document.body.innerText\" in current tab of front window")
+  * Notes:
+    - Create new note: run_applescript("tell application \"Notes\" to make new note at folder \"Notes\" with properties {name:\"Note Title\", body:\"Note content\"}")
+    - List note titles: run_applescript("tell application \"Notes\" to return name of every note")
+  * Reminders:
+    - Add reminder: run_applescript("tell application \"Reminders\" to make new reminder with properties {name:\"Buy groceries\"}")
+  * Music:
+    - Current track: run_applescript("tell application \"Music\" to return (name of current track & \" by \" & artist of current track)")
+  * Finder:
+    - Reveal file: run_applescript("tell application \"Finder\" to reveal POSIX file \"/path/to/file\"")
 - RESEARCH & DOCUMENT CREATION (Pages, Word, TextEdit, Safari):
-  1. If user asks to find/open in Safari, open it: run_terminal_command("open -a Safari 'https://en.wikipedia.org/wiki/Topic'")
+  1. If user asks to find/open in Safari, open it: run_applescript("tell application \"Safari\" to open location \"https://en.wikipedia.org/wiki/Topic\"")
   2. NEVER manually echo or re-type article text into terminal commands. ALWAYS pipe command output directly into files!
      Working Wikipedia fetch on macOS:
      run_terminal_command("curl -sL 'https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&titles=Topic_Name&format=json' | python3 -c \"import sys,json; p=json.load(sys.stdin)['query']['pages']; print(next(iter(p.values()))['extract'])\" > /tmp/topic_raw.txt")
      (Note: Always use next(iter(p.values()))['extract'] in python because Wikipedia keys pages by numeric ID. Never use grep -P on macOS.)
   3. Summarize /tmp/topic_raw.txt into /tmp/summary.txt via python:
      run_terminal_command("python3 -c \"import sys; text=open('/tmp/topic_raw.txt').read()[:4000]; paragraphs=[p.strip() for p in text.split('\\n') if len(p.strip()) > 50][:4]; open('/tmp/summary.txt','w').write('\\n\\n'.join(paragraphs))\"")
-  4. Create & populate Pages document via AppleScript:
-     run_terminal_command("osascript -e 'set txt to read POSIX file \"/tmp/summary.txt\" as «class utf8»' -e 'tell application \"Pages\"' -e 'activate' -e 'set doc to make new document' -e 'set body text of doc to txt' -e 'end tell'")
+  4. Create & populate Pages document via run_applescript:
+     run_applescript("set txt to read POSIX file \"/tmp/summary.txt\" as «class utf8»\ntell application \"Pages\"\nactivate\nset doc to make new document\nset body text of doc to txt\nend tell")
      (Or convert via textutil: textutil -convert docx /tmp/summary.txt -output ~/Desktop/Summary.docx && open -a Pages ~/Desktop/Summary.docx)
   5. Check file exists and is non-empty before calling done(): run_terminal_command("[ -s /tmp/summary.txt ] && echo OK")
-- DO NOT ESCALATE FOR ACTIONS YOU CAN DO YOURSELF: You have full access to run_terminal_command, open_app, and write_clipboard.
-  If you need to run a command (like textutil, python, curl, osascript) or open an app, execute it directly! NEVER call escalate to run commands.
+- DO NOT ESCALATE FOR ACTIONS YOU CAN DO YOURSELF: You have full access to run_applescript, run_terminal_command, open_app, and write_clipboard.
+  If you need to automate an app, run a command (like textutil, python, curl, osascript) or open an app, execute it directly! NEVER call escalate to run commands or scripts.
 - ESCALATE IS A LAST RESORT: Only call escalate if an external roadblock truly prevents achieving the plan.
 - NEVER output `{"needs_plan": true}` during execution. If an action fails twice or you need replanning,
   call `escalate(reason: "...")`.
 - Never call wait consecutively. If a target element or file is not visible, use
-  run_terminal_command, open_app, or escalate(reason). Do NOT loop wait.
+  run_applescript, run_terminal_command, open_app, or escalate(reason). Do NOT loop wait.
 - If the subgoal appears already complete based on the current state,
   call "done" instead of taking a redundant action.
 - If you cannot find anything on screen that matches what the subgoal
@@ -142,6 +169,7 @@ Rules:
   present in what you were given.
 
 Available tools:
+- run_applescript(script): Executes native AppleScript code directly. PREFER THIS for automating Pages, Safari, Notes, Reminders, Finder, Mail, Music, etc.
 - run_terminal_command(command): Executes a zsh shell command (e.g. ls ~/Desktop, open ~/Desktop/file.pages, cat file.txt, curl, find, git). PREFER THIS for files & system.
 - click(element_id | x,y): Clicks an element or coordinate.
 - type(text): Types text into the focused application.
@@ -256,7 +284,7 @@ no extra commentary.
                     OMLXChatMessage(role: .assistant, text: modelResponse.contentText),
                     OMLXChatMessage(
                         role: .user,
-                        text: "Error: Your response was not a valid tool call. You must reply ONLY with a tool call in the form `tool_name(...)` or `done()`. Do NOT output conversational prose, explanations, or markdown. Example: open_app(\"Safari\") or run_terminal_command(\"ls ~/Desktop\") or done()."
+                        text: "Error: Your response was not a valid tool call. You must reply ONLY with a tool call in the form `tool_name(...)` or `done()`. Do NOT output conversational prose, explanations, or markdown. Example: run_applescript(\"tell application \\\"Pages\\\" to make new document\") or run_terminal_command(\"ls ~/Desktop\") or done()."
                     )
                 ]
                 for retryAttempt in 1...2 {
@@ -363,11 +391,11 @@ no extra commentary.
                     }
                 }
 
-                // Intercept premature escalate when the model has tools to do it directly (textutil, command, python, curl, osascript)
-                let selfExecutableKeywords = ["textutil", "curl", "python", "open_app", "command", "osascript", "applescript", "convert", "script"]
+                // Intercept premature escalate when the model has tools to do it directly (textutil, command, python, curl, osascript, run_applescript)
+                let selfExecutableKeywords = ["textutil", "curl", "python", "open_app", "command", "osascript", "applescript", "convert", "script", "run_applescript"]
                 if selfExecutableKeywords.contains(where: { lowerReason.contains($0) }) {
                     print("🛡️ AgentActorLoop: Intercepting misuse of escalate('\(reason)'). Reminding actor to execute directly.")
-                    let guidance = "Error: Do not call escalate to run commands or tools. You have full access to run_terminal_command, open_app, and write_clipboard. Execute the action directly."
+                    let guidance = "Error: Do not call escalate to run commands or tools. You have full access to run_applescript, run_terminal_command, open_app, and write_clipboard. Execute the action directly."
                     _ = stateManager.recordActionExecution(
                         actionSummary: "escalate(\(reason.prefix(40))) [INTERCEPTED]",
                         resultSummary: guidance,
@@ -387,18 +415,18 @@ no extra commentary.
                 continue
             }
 
-            // 6. Block repeated identical failing commands
-            if validToolCall.toolName == "run_terminal_command",
-               let cmd = (validToolCall.arguments["command"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            // 6. Block repeated identical failing commands or scripts
+            if (validToolCall.toolName == "run_terminal_command" || validToolCall.toolName == "run_applescript"),
+               let cmd = ((validToolCall.arguments["command"] as? String) ?? (validToolCall.arguments["script"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines) {
                 if lastCommandFailed && lastExecutedCommand == cmd {
-                    print("🛡️ AgentActorLoop: Blocking repeated identical failing command: \(cmd)")
-                    let blockedMessage = "Error: That exact command failed on the previous step (\(lastCommandError.prefix(120))). Do not repeat identical failed commands. Change your command, pipe to a file, or use a python script."
+                    print("🛡️ AgentActorLoop: Blocking repeated identical failing \(validToolCall.toolName): \(cmd)")
+                    let blockedMessage = "Error: That exact command/script failed on the previous step (\(lastCommandError.prefix(120))). Do not repeat identical failed actions. Modify your approach, check arguments, or use an alternative tool."
                     _ = stateManager.recordActionExecution(
-                        actionSummary: "run_terminal_command(\(cmd.prefix(40))...) [BLOCKED REPEAT]",
+                        actionSummary: "\(validToolCall.toolName)(\(cmd.prefix(40))...) [BLOCKED REPEAT]",
                         resultSummary: blockedMessage,
                         isActionSuccessful: false
                     )
-                    onStepCompleted?("run_terminal_command", blockedMessage)
+                    onStepCompleted?(validToolCall.toolName, blockedMessage)
                     continue
                 }
             }
@@ -412,8 +440,8 @@ no extra commentary.
             let isActionSuccessful = !toolExecutionResult.lowercased().hasPrefix("error")
 
             // Track command execution outcome
-            if validToolCall.toolName == "run_terminal_command",
-               let cmd = (validToolCall.arguments["command"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            if (validToolCall.toolName == "run_terminal_command" || validToolCall.toolName == "run_applescript"),
+               let cmd = ((validToolCall.arguments["command"] as? String) ?? (validToolCall.arguments["script"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines) {
                 lastExecutedCommand = cmd
                 lastCommandFailed = !isActionSuccessful
                 lastCommandError = isActionSuccessful ? "" : toolExecutionResult
@@ -721,6 +749,24 @@ no extra commentary.
             }
             arguments["command"] = commandString
 
+        case "run_applescript":
+            var scriptString = trimmed
+            if scriptString.lowercased().hasPrefix("script=") || scriptString.lowercased().hasPrefix("script:") {
+                let dropCount = 7
+                scriptString = String(scriptString.dropFirst(dropCount)).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if scriptString.lowercased().hasPrefix("code=") || scriptString.lowercased().hasPrefix("code:") {
+                let dropCount = 5
+                scriptString = String(scriptString.dropFirst(dropCount)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if (scriptString.hasPrefix("\"") && scriptString.hasSuffix("\"")) ||
+               (scriptString.hasPrefix("'") && scriptString.hasSuffix("'")) {
+                scriptString = String(scriptString.dropFirst().dropLast())
+            }
+            // Unescape quotes and newlines if passed escaped in single-line function syntax
+            scriptString = scriptString.replacingOccurrences(of: "\\n", with: "\n")
+                                      .replacingOccurrences(of: "\\\"", with: "\"")
+            arguments["script"] = scriptString
+
         case "open_url", "read_webpage":
             var urlString = trimmed
             if urlString.lowercased().hasPrefix("url=") || urlString.lowercased().hasPrefix("url:") {
@@ -887,8 +933,8 @@ no extra commentary.
 
         let lowerResult = toolResult.lowercased()
         var contextNote = ""
-        if lowerResult.contains("successfully opened") || lowerResult.contains("exit status 0") {
-            contextNote = "\nNote: The command succeeded with exit status 0 (no errors). Confirm to the user that the file or application was opened/completed."
+        if lowerResult.contains("successfully opened") || lowerResult.contains("exit status 0") || lowerResult.contains("executed successfully") {
+            contextNote = "\nNote: The command or AppleScript succeeded without errors. Confirm to the user that the file, application, or action was opened/completed."
         }
 
         let synthesisUserPrompt = """
@@ -1003,6 +1049,8 @@ All lowercase, no markdown, no emojis.
             return "run_terminal_command"
         case "launch_app", "open":
             return "open_app"
+        case "applescript", "run_applescript", "osascript":
+            return "run_applescript"
         default:
             return clean
         }

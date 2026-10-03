@@ -45,8 +45,8 @@ User speaks (ctrl+option held)
       For each subgoal:
         → Capture fresh screen state (AX tree preferred)
         → Reconstruct fresh prompt from AgentStateManager
-        → Model returns single tool call: click, type, scroll, point, open_app, wait, done, escalate
-        → AgentToolExecutor executes tool via AXUIElement or CGEvent
+        → Model returns single tool call: run_applescript, run_terminal_command, click, type, scroll, point, open_app, wait, done, escalate
+        → AgentToolExecutor executes tool via osascript (AppleScript), zsh shell, AXUIElement, or CGEvent
         → AgentStateManager compresses result into 1 line, increments/resets failure count
         → On 3 consecutive failures or explicit escalate → re-invoke AgentPlanner with failure context
   → On success: LocalVectorStore saves completed trajectory
@@ -75,9 +75,9 @@ User speaks (ctrl+option held)
 | `OMLXClient.swift` | ~475 | HTTP client wrapper for oMLX OpenAI-compatible endpoints (`localhost:8000/v1`) and admin API. Configured for single resident 9B model + embedder with no swapping. |
 | `PerceptionManager.swift` | ~380 | UI perception layer. Reads the `AXUIElement` hierarchy for active windows and falls back to ScreenCaptureKit screenshots only when permitted and necessary. |
 | `AgentStateManager.swift` | ~320 | External task state manager. Owns task goal, subgoals, compressed 1-line action history, stall detection, and failure counters outside model context. |
-| `AgentPlanner.swift` | ~180 | Planner orchestrator using `qwen3.5-9b`. Houses verbatim planner prompt, turns goal + screen state + RAG hints into ordered subgoals JSON with terminal-first preference. |
-| `AgentActorLoop.swift` | ~1060 | Execution loop using resident `qwen3.5-9b`. Evaluates first-turn triage, executes atomic tool calls with terminal-first preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
-| `AgentToolExecutor.swift` | ~555 | Executes agent tools: click (AXUIElement with CGEvent fallback), type, scroll, point, open_app, wait, done, escalate, shell commands via zsh with PATH resolution, and clipboard. |
+| `AgentPlanner.swift` | ~190 | Planner orchestrator using `qwen3.5-9b`. Houses verbatim planner prompt, turns goal + screen state + RAG hints into ordered subgoals JSON with terminal and AppleScript preference. |
+| `AgentActorLoop.swift` | ~1110 | Execution loop using resident `qwen3.5-9b`. Evaluates first-turn triage, executes atomic tool calls with terminal & AppleScript preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
+| `AgentToolExecutor.swift` | ~630 | Executes agent tools: run_applescript (direct osascript via stdin with safety timeout), run_terminal_command (zsh with PATH resolution), click (AXUIElement with CGEvent fallback), type, scroll, point, open_app, wait, done, escalate, and clipboard. |
 | `LocalVectorStore.swift` | ~270 | Pure Swift in-process SQLite vector store with Accelerate `vDSP` cosine similarity for trajectories and per-app UI maps. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
 | `CompanionPanelView.swift` | ~700 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |

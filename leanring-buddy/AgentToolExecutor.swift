@@ -50,6 +50,8 @@ class AgentToolExecutor {
                 result = executeEscalate(arguments: arguments)
             case "run_terminal_command":
                 result = try await executeRunTerminalCommand(arguments: arguments)
+            case "run_applescript", "applescript", "osascript":
+                result = try await executeRunAppleScript(arguments: arguments)
             case "open_url":
                 result = try await executeOpenURL(arguments: arguments)
             case "search_web":
@@ -259,6 +261,15 @@ class AgentToolExecutor {
         return output
     }
 
+    /// Executes native AppleScript directly via /usr/bin/osascript through stdin piping (eliminates shell quoting issues).
+    private func executeRunAppleScript(arguments: [String: Any]) async throws -> String {
+        guard let script = (arguments["script"] as? String) ?? (arguments["code"] as? String) ?? (arguments["source"] as? String),
+              !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "Error: missing 'script' argument"
+        }
+        return try await runAppleScript(script)
+    }
+
     /// Opens a URL in the default browser.
     private func executeOpenURL(arguments: [String: Any]) async throws -> String {
         guard let urlString = arguments["url"] as? String,
@@ -364,11 +375,10 @@ class AgentToolExecutor {
             return "Error: missing 'text' argument"
         }
 
-        // Use AppleScript to type text — more reliable than CGEvent for unicode
+        // Use AppleScript to type text directly — more reliable than CGEvent for unicode
         let escapedText = text.replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "tell application \"System Events\" to keystroke \"\(escapedText)\""
-        let result = try await runShellCommand("osascript -e '\(appleScript)'")
-        _ = result  // osascript returns empty on success
+        _ = try await runAppleScript(appleScript)
 
         return "Typed text: \(text.prefix(100))\(text.count > 100 ? "..." : "")"
     }
@@ -485,6 +495,62 @@ class AgentToolExecutor {
                     continuation.resume(returning: combined.trimmingCharacters(in: .newlines))
                 } catch {
                     continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Runs AppleScript source code directly via /usr/bin/osascript with stdin piping and safety timeout.
+    private func runAppleScript(_ script: String) async throws -> String {
+        return try await withCheckedThrowingContinuation { continuation in
+            Task.detached(priority: .userInitiated) {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                process.arguments = ["-"]  // Read script directly from stdin, avoiding all shell quote issues
+
+                let stdinPipe = Pipe()
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+
+                process.standardInput = stdinPipe
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
+
+                do {
+                    try process.run()
+
+                    if let scriptData = script.data(using: .utf8) {
+                        stdinPipe.fileHandleForWriting.write(scriptData)
+                    }
+                    stdinPipe.fileHandleForWriting.closeFile()
+
+                    // Safety timeout: 20 seconds to prevent interactive modal hangs
+                    let timeoutTask = Task {
+                        try? await Task.sleep(nanoseconds: 20_000_000_000)
+                        if process.isRunning {
+                            process.terminate()
+                        }
+                    }
+
+                    process.waitUntilExit()
+                    timeoutTask.cancel()
+
+                    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
+                    let stdoutText = String(data: stdoutData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let stderrText = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                    if process.terminationStatus != 0 {
+                        let errorMsg = stderrText.isEmpty ? "AppleScript exited with code \(process.terminationStatus)" : stderrText
+                        continuation.resume(returning: "Error: \(errorMsg)")
+                    } else if !stdoutText.isEmpty {
+                        continuation.resume(returning: stdoutText)
+                    } else {
+                        continuation.resume(returning: "AppleScript executed successfully (no output)")
+                    }
+                } catch {
+                    continuation.resume(returning: "Error executing AppleScript: \(error.localizedDescription)")
                 }
             }
         }
