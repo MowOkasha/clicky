@@ -400,7 +400,37 @@ class AgentToolExecutor {
         return "Typed text: \(text.prefix(100))\(text.count > 100 ? "..." : "")"
     }
 
+    /// Returns a list of currently running applications.
+    private func executeListRunningApps() -> String {
+        let runningApps = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }  // Only visible regular apps
+            .compactMap { $0.localizedName }
+            .sorted()
 
+        if runningApps.isEmpty {
+            return "No running applications found"
+        }
+
+        return "Running applications:\n" + runningApps.map { "- \($0)" }.joined(separator: "\n")
+    }
+
+    /// Reads text content from the clipboard.
+    private func executeReadClipboard() -> String {
+        guard let clipboardText = NSPasteboard.general.string(forType: .string) else {
+            return "Clipboard is empty or contains non-text content"
+        }
+        return "Clipboard contents:\n\(clipboardText)"
+    }
+
+    /// Writes text to the clipboard.
+    private func executeWriteClipboard(arguments: [String: Any]) throws -> String {
+        guard let text = arguments["text"] as? String else {
+            return "Error: missing 'text' argument"
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        return "Copied to clipboard: \(text.prefix(100))\(text.count > 100 ? "..." : "")"
+    }
 
     // MARK: - Private Helpers
 
