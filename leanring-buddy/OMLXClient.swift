@@ -175,7 +175,8 @@ actor OMLXClient {
         messages: [OMLXChatMessage],
         temperature: Double = 0.0,
         maxTokens: Int? = nil,
-        enableThinking: Bool = true
+        enableThinking: Bool = true,
+        responseFormat: [String: Any]? = nil
     ) async throws -> OMLXChatCompletionResponse {
         let endpointURL = serverBaseURL.appendingPathComponent("chat/completions")
         var urlRequest = URLRequest(url: endpointURL)
@@ -204,6 +205,10 @@ actor OMLXClient {
 
         if let maxTokens = maxTokens {
             requestBody["max_tokens"] = maxTokens
+        }
+
+        if let responseFormat = responseFormat {
+            requestBody["response_format"] = responseFormat
         }
 
         if !enableThinking {

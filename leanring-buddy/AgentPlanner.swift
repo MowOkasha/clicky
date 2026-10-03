@@ -117,7 +117,8 @@ Rules:
             messages: messages,
             temperature: 0.1,
             maxTokens: 500,
-            enableThinking: false
+            enableThinking: false,
+            responseFormat: ["type": "json_object"]
         )
         print("🧠 AgentPlanner: Received response in \(String(format: "%.2f", response.requestDuration))s")
 
@@ -154,9 +155,14 @@ Rules:
         }
 
         // Locate JSON bounds if there's any surrounding commentary
-        if let openingBraceIndex = cleanedText.firstIndex(of: "{"),
-           let closingBraceIndex = cleanedText.lastIndex(of: "}") {
-            cleanedText = String(cleanedText[openingBraceIndex...closingBraceIndex])
+        let firstOpenBrace = cleanedText.firstIndex(of: "{")
+        let firstOpenBracket = cleanedText.firstIndex(of: "[")
+
+        if let brace = firstOpenBrace, (firstOpenBracket == nil || brace < firstOpenBracket!),
+           let lastBrace = cleanedText.lastIndex(of: "}") {
+            cleanedText = String(cleanedText[brace...lastBrace])
+        } else if let bracket = firstOpenBracket, let lastBracket = cleanedText.lastIndex(of: "]") {
+            cleanedText = String(cleanedText[bracket...lastBracket])
         }
 
         guard let jsonData = cleanedText.data(using: .utf8) else {
@@ -167,14 +173,32 @@ Rules:
             )
         }
 
+        struct RawSubgoal: Decodable {
+            let id: Int
+            let description: String
+        }
+
         struct PlannerJSONResponse: Decodable {
-            struct RawSubgoal: Decodable {
-                let id: Int
-                let description: String
-            }
             let subgoals: [RawSubgoal]
         }
 
+        // Attempt 1: Standard object with "subgoals" key
+        if let decodedResponse = try? JSONDecoder().decode(PlannerJSONResponse.self, from: jsonData),
+           !decodedResponse.subgoals.isEmpty {
+            return decodedResponse.subgoals.map { raw in
+                AgentSubgoal(id: raw.id, description: raw.description, status: .pending)
+            }
+        }
+
+        // Attempt 2: Direct top-level array of subgoals
+        if let rawArray = try? JSONDecoder().decode([RawSubgoal].self, from: jsonData),
+           !rawArray.isEmpty {
+            return rawArray.map { raw in
+                AgentSubgoal(id: raw.id, description: raw.description, status: .pending)
+            }
+        }
+
+        // Attempt 3: Strict decode with detailed error reporting
         do {
             let decodedResponse = try JSONDecoder().decode(PlannerJSONResponse.self, from: jsonData)
             let subgoals = decodedResponse.subgoals.map { raw in

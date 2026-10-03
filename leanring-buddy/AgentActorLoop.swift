@@ -68,9 +68,10 @@ Rules:
 1. Emit exactly ONE tool call per turn. Never describe multiple steps.
 2. PREFER run_terminal_command for files, directories, git, and scripts.
 3. PREFER run_applescript for scriptable Mac apps (Pages, Safari, Notes, Reminders, Finder, Mail).
-4. BACKGROUND EXECUTION: run_terminal_command, run_applescript, and open_app execute independently in the background; you do NOT need a window frontmost to run commands or scripts.
-5. If the current subgoal is already satisfied by the current screen state, call done().
-6. Only call escalate(reason) if an external roadblock truly prevents achieving the plan. Never escalate to run commands or scripts you have tools for.
+4. WEB & BROWSING: Use open_app("Safari") or open_url("https://...") to browse. Use read_webpage(url) or curl via run_terminal_command to inspect web content. Never attempt manual clicking or typing into browser address bars.
+5. BACKGROUND EXECUTION: run_terminal_command, run_applescript, and open_app execute independently in the background; you do NOT need a window frontmost to run commands or scripts.
+6. If the current subgoal is already satisfied by the current screen state, call done().
+7. Only call escalate(reason) if an external roadblock truly prevents achieving the plan. Never escalate to run commands or scripts you have tools for.
 
 Available tools:
 - run_terminal_command(command): executes zsh shell command
@@ -626,18 +627,36 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
                 return ParsedActorToolCall(toolName: toolName, arguments: arguments, rawText: rawText)
             }
         }
-        
+
+        // 5. Robust fallback: search anywhere in text for any valid tool invocation
+        let validToolNames = [
+            "run_terminal_command", "run_applescript", "open_app", "open_url",
+            "click", "type", "type_text", "scroll", "point", "read_webpage",
+            "search_web", "list_running_apps", "read_clipboard", "write_clipboard",
+            "wait", "done", "escalate"
+        ]
+        for candidateName in validToolNames {
+            if let range = rawText.range(of: "\(candidateName)(") {
+                let afterOpen = rawText[range.upperBound...]
+                if let lastClose = afterOpen.lastIndex(of: ")") {
+                    let insideArgs = String(afterOpen[..<lastClose]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let arguments = parseFunctionCallArguments(toolName: candidateName, rawArgumentsString: insideArgs)
+                    return ParsedActorToolCall(toolName: candidateName, arguments: arguments, rawText: rawText)
+                }
+            }
+        }
+
         return nil
     }
-    
+
     private func parseFunctionCallArguments(toolName: String, rawArgumentsString: String) -> [String: Any] {
         var arguments: [String: Any] = [:]
         let trimmed = rawArgumentsString.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         if trimmed.isEmpty {
             return arguments
         }
-        
+
         // Special handling per tool signature
         switch toolName {
         case "run_terminal_command":
@@ -653,6 +672,8 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
                (commandString.hasPrefix("'") && commandString.hasSuffix("'")) {
                 commandString = String(commandString.dropFirst().dropLast())
             }
+            commandString = commandString.replacingOccurrences(of: "\\n", with: "\n")
+                                         .replacingOccurrences(of: "\\\"", with: "\"")
             arguments["command"] = commandString
 
         case "run_applescript":
@@ -808,6 +829,8 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
                 }
             }
         }
+        token = token.replacingOccurrences(of: "\\\"", with: "\"")
+        token = token.replacingOccurrences(of: "\\n", with: "\n")
         return token
     }
     
