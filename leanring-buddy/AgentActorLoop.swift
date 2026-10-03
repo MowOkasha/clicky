@@ -495,7 +495,7 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
         }
 
         // 2c. Fallback: Check if response or user goal indicates opening an application
-        if let recoveredAppName = extractAppNameToOpen(fromModelResponse: cleanedText, orUserGoal: stateManager.taskGoal) {
+        if let recoveredAppName = extractAppNameToOpen(fromModelResponse: cleanedText, orUserGoal: stateManager.userGoal) {
             print("🧠 AgentActorLoop: Recovered app launch intent for '\(recoveredAppName)' from triage text: \"\(cleanedText)\"")
             let recoveredToolCall = ParsedActorToolCall(
                 toolName: "open_app",
