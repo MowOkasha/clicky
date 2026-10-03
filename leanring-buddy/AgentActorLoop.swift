@@ -35,30 +35,45 @@ class AgentActorLoop {
     /// Maximum number of total actor tool calls before aborting a runaway task.
     let maximumTotalSteps: Int = 30
     
-    /// Compact triage system prompt (~220 tokens) dedicated to first-turn intent classification and direct answers.
+    /// Compact triage system prompt dedicated to first-turn intent classification and direct answers.
     static let triageSystemPrompt: String = """
-You are Clicky, a friendly voice companion in the macOS menu bar. The user speaks via push-to-talk, and your replies are spoken aloud via text-to-speech.
+You are Clicky, an autonomous voice companion that controls the user's macOS computer.
 
-Decide which path this request should take:
+CRITICAL RULES:
+1. If the user wants to DO anything on their Mac (open an app, search the web, run a command, inspect files, click or type), you MUST choose PATH B or PATH C.
+2. NEVER reply with conversational text promising to do an action (e.g. "opening safari for you", "i'll do that"). Text replies CANNOT control the computer! To take action, you MUST output a tool call or {"needs_plan": true}.
+3. PATH A is ONLY for general conversation or knowledge questions that do NOT touch the user's Mac (e.g. "what is quantum computing?", "how's the weather?", "tell me a joke").
+4. Single immediate requests like checking files, listing directories, reading clipboard, or launching an app belong in PATH B, NOT Path C.
 
-PATH A — DIRECT ANSWER (reply with text, no tool call):
-  Use when the user is chatting, asking a question, greeting, or discussing anything that does not require automating their Mac.
-  Style: casual, warm, concise, all lowercase, no markdown, no emojis. 1-2 sentences.
-  Examples: "hey clicky", "what is a tpu?", "explain quantum computing", "thanks that worked".
+Choose ONE of these paths:
 
-PATH B — DIRECT TOOL (emit exactly ONE tool call):
-  Use when the request is a single immediate action:
-  - Terminal & files: run_terminal_command("ls ~/Desktop"), run_terminal_command("cat ~/Desktop/notes.txt"), run_terminal_command("git status")
-  - Scriptable apps: run_applescript("tell application \"Notes\" to make new note with properties {name:\"Test\", body:\"Hello\"}")
-  - System: open_app("Safari"), open_url("https://..."), click(element_id), type("hello")
+PATH A — DIRECT CHAT (ONLY for chit-chat or general knowledge questions):
+  Respond with concise conversational text (1-2 sentences, lowercase, no markdown).
+  Examples:
+  - "what is a neural net?" -> a neural net is a machine learning model inspired by the brain.
+  - "who wrote hamlet?" -> william shakespeare wrote hamlet.
 
-PATH C — NEEDS PLAN (respond ONLY with JSON: {"needs_plan": true, "reason": "<short reason>"}):
-  Use ONLY for multi-step tasks across apps or windows that require multiple sequential UI steps.
-  Examples: "send an email to John about the meeting", "research quantum computing and save a summary in Pages".
-  NOTE: If checking a file or directory can be done with run_terminal_command or run_applescript, use PATH B, NOT Path C.
+PATH B — DIRECT TOOL (Single immediate computer action):
+  Respond ONLY with a single tool call in function syntax. No conversational text.
+  Examples:
+  - "open safari" or "can you open safari?" -> open_app("Safari")
+  - "launch pages" or "can you open pages?" -> open_app("Pages")
+  - "open terminal" -> open_app("Terminal")
+  - "search for apple stock on safari" -> open_url("https://www.google.com/search?q=apple+stock")
+  - "what files are on my desktop?" -> run_terminal_command("ls ~/Desktop")
+  - "check git status" -> run_terminal_command("git status")
+  - "what's on my clipboard?" -> read_clipboard()
+  - "what apps are open?" -> list_running_apps()
 
-Respond with either conversational text (Path A), a single tool call (Path B), or {"needs_plan": true, "reason": "..."} (Path C).
+PATH C — MULTI-STEP PLAN (Complex workflows across apps):
+  Respond ONLY with JSON: {"needs_plan": true, "reason": "<short reason>"}
+  Examples:
+  - "research the Lebanese civil war and write a summary into Pages" -> {"needs_plan": true, "reason": "Requires web search, reading content, and creating a Pages document."}
+  - "find all pdfs on desktop and email them to Sarah" -> {"needs_plan": true, "reason": "Requires finding files and composing an email."}
+
+Output ONLY the tool call (Path B), the JSON (Path C), or conversational text (Path A).
 """
+
 
     /// Streamlined actor execution prompt (~340 tokens) for step-by-step tool execution on assigned subgoals.
     static let actorSystemPrompt: String = """
@@ -465,6 +480,38 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
             return .directTool(toolCall)
         }
         
+        // 2b. Fallback: Check if response mentioned needing a plan
+        let lowerCleaned = cleanedText.lowercased()
+        if lowerCleaned.contains("needs_plan") || lowerCleaned.contains("need to make a plan") || lowerCleaned.contains("need a plan") {
+            print("🧠 AgentActorLoop: Detected conversational planning intent in triage: \(cleanedText)")
+            DebugEventLogger.shared.log(.triageResult(
+                decision: "needs_plan",
+                reason: "Conversational planning intent detected",
+                promptTokens: modelResponse.promptTokens,
+                completionTokens: modelResponse.completionTokens,
+                durationSeconds: modelResponse.requestDuration
+            ))
+            return .needsPlan(reason: "Model signaled planning requirement in text")
+        }
+
+        // 2c. Fallback: Check if response or user goal indicates opening an application
+        if let recoveredAppName = extractAppNameToOpen(fromModelResponse: cleanedText, orUserGoal: stateManager.taskGoal) {
+            print("🧠 AgentActorLoop: Recovered app launch intent for '\(recoveredAppName)' from triage text: \"\(cleanedText)\"")
+            let recoveredToolCall = ParsedActorToolCall(
+                toolName: "open_app",
+                arguments: ["name": recoveredAppName],
+                rawText: cleanedText
+            )
+            DebugEventLogger.shared.log(.triageResult(
+                decision: "direct_tool(open_app[\(recoveredAppName)])",
+                reason: "Recovered from conversational response",
+                promptTokens: modelResponse.promptTokens,
+                completionTokens: modelResponse.completionTokens,
+                durationSeconds: modelResponse.requestDuration
+            ))
+            return .directTool(recoveredToolCall)
+        }
+
         // 3. Otherwise, it's a direct text answer
         DebugEventLogger.shared.log(.triageResult(
             decision: "direct_answer",
@@ -474,6 +521,70 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
             durationSeconds: modelResponse.requestDuration
         ))
         return .directAnswer(cleanedText)
+    }
+
+    /// Attempts to extract an application name if the model or user goal expressed an intent to open/launch an app.
+    private func extractAppNameToOpen(fromModelResponse modelResponse: String, orUserGoal userGoal: String) -> String? {
+        let knownAppNames: [String: String] = [
+            "safari": "Safari",
+            "pages": "Pages",
+            "terminal": "Terminal",
+            "notes": "Notes",
+            "finder": "Finder",
+            "chrome": "Google Chrome",
+            "google chrome": "Google Chrome",
+            "music": "Music",
+            "mail": "Mail",
+            "system settings": "System Settings",
+            "settings": "System Settings",
+            "calculator": "Calculator",
+            "messages": "Messages",
+            "calendar": "Calendar",
+            "reminders": "Reminders",
+            "xcode": "Xcode",
+            "code": "Visual Studio Code",
+            "vs code": "Visual Studio Code",
+            "visual studio code": "Visual Studio Code",
+            "slack": "Slack",
+            "spotify": "Spotify",
+            "keynote": "Keynote",
+            "numbers": "Numbers",
+            "preview": "Preview",
+            "textedit": "TextEdit"
+        ]
+
+        let openPattern = #"(?:opening|open|launching|launch|opening up)\s+([a-zA-Z0-9\s]+?)(?:\s+for you|\.|\!|\?|\s*$)"#
+        guard let regex = try? NSRegularExpression(pattern: openPattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+
+        // 1. Check model response first (e.g. "hey clicky, opening pages for you", "opening Safari")
+        let modelNs = modelResponse as NSString
+        if let match = regex.firstMatch(in: modelResponse, options: [], range: NSRange(location: 0, length: modelNs.length)),
+           match.numberOfRanges >= 2 {
+            let candidate = modelNs.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if let canonical = knownAppNames[candidate] {
+                return canonical
+            }
+            if !candidate.isEmpty && candidate.count <= 30 && !candidate.contains("something") && !candidate.contains("that") {
+                return candidate.capitalized
+            }
+        }
+
+        // 2. Check user goal if user explicitly asked to open an app (e.g. "Can you open Pages?", "open Safari")
+        let goalNs = userGoal as NSString
+        if let match = regex.firstMatch(in: userGoal, options: [], range: NSRange(location: 0, length: goalNs.length)),
+           match.numberOfRanges >= 2 {
+            let candidate = goalNs.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if let canonical = knownAppNames[candidate] {
+                return canonical
+            }
+            if !candidate.isEmpty && candidate.count <= 30 && !candidate.contains("something") && !candidate.contains("that") {
+                return candidate.capitalized
+            }
+        }
+
+        return nil
     }
     
     /// Strips any <think>...</think> tags that reasoning models may output, including unclosed blocks.

@@ -46,18 +46,12 @@ Rules:
      NOTE: macOS grep is BSD grep and does NOT support -P. NEVER use grep -oP or grep -oE on raw JSON.
 
 3. SUMMARIZING & POPULATING PAGES DOCUMENTS:
-   For tasks requiring a summary put into Pages, Word, or TextEdit:
-   - Step 1 (if requested): Open Safari to the article URL so the user sees the page:
-     run terminal command: open -a Safari 'https://en.wikipedia.org/wiki/Topic_Name'
-   - Step 2: Fetch full text directly to /tmp/topic_raw.txt via curl and python.
-   - Step 3: Summarize /tmp/topic_raw.txt into /tmp/summary.txt using a clean python script:
-     python3 -c "import sys; text=open('/tmp/topic_raw.txt').read()[:4000]; paragraphs=[p.strip() for p in text.split('\n') if len(p.strip()) > 50][:4]; open('/tmp/summary.txt','w').write('\n\n'.join(paragraphs))"
-   - Step 4: Create new Pages document with the summary via run_applescript:
-     tell application "Pages" to activate
-     set doc to make new document
-     set body text of doc to (read POSIX file "/tmp/summary.txt" as «class utf8»)
-     (Or convert via textutil: textutil -convert docx /tmp/summary.txt -output ~/Desktop/Summary.docx && open -a Pages ~/Desktop/Summary.docx)
-   - Step 5: Verify the summary exists and is non-empty: [ -s /tmp/summary.txt ].
+   For tasks requiring research or summaries put into Pages, Word, or Notes:
+   - Step 1: Open browser (e.g. Safari) to the topic if requested.
+   - Step 2: Fetch article or query data directly to a temporary file via curl.
+   - Step 3: Summarize content into a temporary text file.
+   - Step 4: Create new Pages document and insert the summary via AppleScript.
+   - Step 5: Verify the document exists and is populated.
 
 4. APPLESCRIPT AUTOMATION (run_applescript):
    PREFER run_applescript over GUI clicking for scriptable macOS apps:
@@ -67,9 +61,10 @@ Rules:
    - Reminders: make new reminder
    - Music: get current track, control playback
 
-5. GENERAL PLANNING:
+5. GENERAL PLANNING & FORMATTING:
    - Prefer terminal commands over manual clicking for file operations (ls, open, cat, find).
    - When replanning, plan ONLY the remaining subgoals needed to complete the user goal. Do not repeat completed subgoals.
+   - Subgoals must be concise, high-level descriptions (1-2 sentences). Do NOT paste giant raw shell scripts or multi-line python code into the JSON description strings; describe what each step accomplishes so the executor can select the appropriate tool.
    - Output ONLY valid JSON, no prose, in this exact shape:
 
 {
@@ -111,12 +106,12 @@ Rules:
             OMLXChatMessage(role: .user, text: userPrompt, base64ImageData: base64Images)
         ]
 
-        print("🧠 AgentPlanner: Invoking qwen3.5-9b planner (thinking disabled, maxTokens: 500)...")
+        print("🧠 AgentPlanner: Invoking qwen3.5-9b planner (thinking disabled, maxTokens: 1024)...")
         let response = try await omlxClient.sendChatCompletionRequest(
             model: OMLXClient.plannerModelAlias,
             messages: messages,
             temperature: 0.1,
-            maxTokens: 500,
+            maxTokens: 1024,
             enableThinking: false,
             responseFormat: ["type": "json_object"]
         )
@@ -198,7 +193,33 @@ Rules:
             }
         }
 
-        // Attempt 3: Strict decode with detailed error reporting
+        // Attempt 3: Resilient regex extraction for malformed quotes or partial JSON
+        let subgoalPattern = #""id"\s*:\s*(\d+)[\s\S]*?"description"\s*:\s*"([\s\S]*?)(?="\s*[,}\]])"#
+        if let regex = try? NSRegularExpression(pattern: subgoalPattern, options: []) {
+            let nsString = cleanedText as NSString
+            let matches = regex.matches(in: cleanedText, options: [], range: NSRange(location: 0, length: nsString.length))
+            if !matches.isEmpty {
+                var recoveredSubgoals: [AgentSubgoal] = []
+                for match in matches {
+                    guard match.numberOfRanges >= 3 else { continue }
+                    let idString = nsString.substring(with: match.range(at: 1))
+                    let rawDescription = nsString.substring(with: match.range(at: 2))
+                    let cleanedDescription = rawDescription
+                        .replacingOccurrences(of: "\\\"", with: "\"")
+                        .replacingOccurrences(of: "\\n", with: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let subgoalId = Int(idString), !cleanedDescription.isEmpty {
+                        recoveredSubgoals.append(AgentSubgoal(id: subgoalId, description: cleanedDescription, status: .pending))
+                    }
+                }
+                if !recoveredSubgoals.isEmpty {
+                    print("✅ AgentPlanner: Successfully recovered \(recoveredSubgoals.count) subgoals via resilient regex fallback")
+                    return recoveredSubgoals
+                }
+            }
+        }
+
+        // Attempt 4: Strict decode with detailed error reporting
         do {
             let decodedResponse = try JSONDecoder().decode(PlannerJSONResponse.self, from: jsonData)
             let subgoals = decodedResponse.subgoals.map { raw in
