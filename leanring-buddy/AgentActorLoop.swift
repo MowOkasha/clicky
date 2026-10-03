@@ -58,6 +58,8 @@ PATH B — DIRECT TOOL (Single immediate computer action):
   Examples:
   - "open safari" or "can you open safari?" -> open_app("Safari")
   - "launch pages" or "can you open pages?" -> open_app("Pages")
+  - "open the pages document on my desktop" -> run_terminal_command("open ~/Desktop/*.pages")
+  - "open the pdf on my desktop" -> run_terminal_command("open ~/Desktop/*.pdf")
   - "open terminal" -> open_app("Terminal")
   - "search for apple stock on safari" -> open_url("https://www.google.com/search?q=apple+stock")
   - "what files are on my desktop?" -> run_terminal_command("ls ~/Desktop")
@@ -85,8 +87,11 @@ Rules:
 3. PREFER run_applescript for scriptable Mac apps (Pages, Safari, Notes, Reminders, Finder, Mail).
 4. WEB & BROWSING: Use open_app("Safari") or open_url("https://...") to browse. Use read_webpage(url) or curl via run_terminal_command to inspect web content. Never attempt manual clicking or typing into browser address bars.
 5. BACKGROUND EXECUTION: run_terminal_command, run_applescript, and open_app execute independently in the background; you do NOT need a window frontmost to run commands or scripts.
-6. If the current subgoal is already satisfied by the current screen state, call done().
-7. Only call escalate(reason) if an external roadblock truly prevents achieving the plan. Never escalate to run commands or scripts you have tools for.
+6. SUBGOAL COMPLETION: Call done() as soon as the current subgoal is achieved!
+   - If the subgoal is an inspection or finding step (e.g. "find file name", "list files", "check status") and your tool output in Recent Action History already contains the answer, call done() immediately! Do NOT run the command again.
+   - If the subgoal's action has been executed or the screen state satisfies it, call done().
+7. DO NOT REPEAT COMMANDS: Never run the exact same command or tool twice in a row. If a command succeeded, use the result to take the next step or call done().
+8. Only call escalate(reason) if an external roadblock truly prevents achieving the plan. Never escalate to run commands or scripts you have tools for.
 
 Available tools:
 - run_terminal_command(command): executes zsh shell command
@@ -138,6 +143,7 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
         var lastExecutedCommand: String?
         var lastCommandFailed: Bool = false
         var lastCommandError: String = ""
+        var lastCommandOutput: String = ""
 
         while !stateManager.isTaskCompleted && stepsTaken < maximumTotalSteps {
             guard let activeSubgoal = stateManager.currentActiveSubgoal() else {
@@ -287,6 +293,8 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
                 onStepCompleted?("done", "Subgoal marked done")
                 lastExecutedCommand = nil
                 lastCommandFailed = false
+                lastCommandError = ""
+                lastCommandOutput = ""
                 continue
             }
 
@@ -333,19 +341,52 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
                 continue
             }
 
-            // 6. Block repeated identical failing commands or scripts
+            // 6. Block repeated identical commands or auto-advance inspection subgoals
             if (validToolCall.toolName == "run_terminal_command" || validToolCall.toolName == "run_applescript"),
                let cmd = ((validToolCall.arguments["command"] as? String) ?? (validToolCall.arguments["script"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines) {
-                if lastCommandFailed && lastExecutedCommand == cmd {
-                    print("🛡️ AgentActorLoop: Blocking repeated identical failing \(validToolCall.toolName): \(cmd)")
-                    let blockedMessage = "Error: That exact command/script failed on the previous step (\(lastCommandError.prefix(120))). Do not repeat identical failed actions. Modify your approach, check arguments, or use an alternative tool."
-                    _ = stateManager.recordActionExecution(
-                        actionSummary: "\(validToolCall.toolName)(\(cmd.prefix(40))...) [BLOCKED REPEAT]",
-                        resultSummary: blockedMessage,
-                        isActionSuccessful: false
-                    )
-                    onStepCompleted?(validToolCall.toolName, blockedMessage)
-                    continue
+                if lastExecutedCommand == cmd {
+                    if lastCommandFailed {
+                        print("🛡️ AgentActorLoop: Blocking repeated identical failing \(validToolCall.toolName): \(cmd)")
+                        let blockedMessage = "Error: That exact command/script failed on the previous step (\(lastCommandError.prefix(120))). Do not repeat identical failed actions. Modify your approach, check arguments, or use an alternative tool."
+                        _ = stateManager.recordActionExecution(
+                            actionSummary: "\(validToolCall.toolName)(\(cmd.prefix(40))...) [BLOCKED REPEAT]",
+                            resultSummary: blockedMessage,
+                            isActionSuccessful: false
+                        )
+                        onStepCompleted?(validToolCall.toolName, blockedMessage)
+                        continue
+                    } else {
+                        // The command already SUCCEEDED on the immediately previous step!
+                        let activeSubgoalDesc = activeSubgoal.description.lowercased()
+                        let isInspectionSubgoal = activeSubgoalDesc.contains("list") ||
+                                                  activeSubgoalDesc.contains("find") ||
+                                                  activeSubgoalDesc.contains("search") ||
+                                                  activeSubgoalDesc.contains("check") ||
+                                                  activeSubgoalDesc.contains("grep") ||
+                                                  activeSubgoalDesc.contains("name") ||
+                                                  activeSubgoalDesc.contains("identify") ||
+                                                  activeSubgoalDesc.contains("get") ||
+                                                  activeSubgoalDesc.contains("locate")
+                        if isInspectionSubgoal {
+                            print("🎯 AgentActorLoop: Inspection subgoal #\(activeSubgoal.id) already received output ('\(lastCommandOutput.prefix(60))'). Auto-advancing subgoal to prevent infinite loop.")
+                            stateManager.completeCurrentActiveSubgoal()
+                            onStepCompleted?("done", "Subgoal inspection complete with result: \(lastCommandOutput.prefix(80))")
+                            lastExecutedCommand = nil
+                            lastCommandFailed = false
+                            lastCommandOutput = ""
+                            continue
+                        } else {
+                            print("🛡️ AgentActorLoop: Blocking repeated identical successful \(validToolCall.toolName): \(cmd)")
+                            let blockedMessage = "Notice: That exact command already ran successfully on the previous step and returned: '\(lastCommandOutput.prefix(120))'. Do not repeat it. If this step is finished, call done(). Otherwise proceed with the next action."
+                            _ = stateManager.recordActionExecution(
+                                actionSummary: "\(validToolCall.toolName)(\(cmd.prefix(40))...) [BLOCKED REPEAT]",
+                                resultSummary: blockedMessage,
+                                isActionSuccessful: true
+                            )
+                            onStepCompleted?(validToolCall.toolName, blockedMessage)
+                            continue
+                        }
+                    }
                 }
             }
 
@@ -363,10 +404,12 @@ Respond with ONLY a single tool call in function-call syntax (e.g. run_terminal_
                 lastExecutedCommand = cmd
                 lastCommandFailed = !isActionSuccessful
                 lastCommandError = isActionSuccessful ? "" : toolExecutionResult
+                lastCommandOutput = toolExecutionResult
             } else {
                 lastExecutedCommand = nil
                 lastCommandFailed = false
                 lastCommandError = ""
+                lastCommandOutput = ""
             }
 
             // 8. Compress result into one line and update state manager

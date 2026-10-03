@@ -67,6 +67,11 @@ Rules:
    - Subgoals must be concise, high-level descriptions (1-2 sentences). Do NOT paste giant raw shell scripts or multi-line python code into the JSON description strings; describe what each step accomplishes so the executor can select the appropriate tool.
    - Output ONLY valid JSON, no prose, in this exact shape:
 
+6. DO NOT OVER-DECOMPOSE SIMPLE FILE OPENING:
+   If the user simply wants to open an existing file, document, or app (e.g. "open the Pages document on my desktop", "open resume.pdf", "open notes"):
+   Do NOT create separate listing or search subgoals. Use a SINGLE subgoal:
+   e.g. {"id": 1, "description": "Open the Pages document on the Desktop using open ~/Desktop/*.pages"}
+
 {
   "subgoals": [
     {"id": 1, "description": "..."},

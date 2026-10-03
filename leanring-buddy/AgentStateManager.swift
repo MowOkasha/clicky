@@ -322,6 +322,9 @@ class AgentStateManager: ObservableObject {
     func constructActorUserPrompt(currentUIStateText: String) -> String {
         var sections: [String] = []
 
+        // Overall Goal
+        sections.append("Overall Goal:\n\(userGoal)")
+
         // Current subgoal
         let currentSubgoalDescription = currentActiveSubgoal()?.description ?? userGoal
         sections.append("Current Subgoal:\n\(currentSubgoalDescription)")
