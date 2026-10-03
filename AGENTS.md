@@ -92,6 +92,7 @@ User speaks (ctrl+option held)
 | `LocalTTSClient.swift` | ~80 | AVSpeechSynthesizer wrapper. Speaks text on-device. Exposes `isPlaying` for transient cursor scheduling. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
+| `ObservationStore.swift` | ~65 | External working memory for Clicky. Offloads full tool outputs to disk in `~/Library/Caches/Clicky/obs/` and returns compact previews to keep context window bounded. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
 | `DebugEventLogger.swift` | ~270 | Singleton terminal debug logger. Streams structured, emoji-prefixed, timestamped events to `~/Library/Logs/Clicky/debug.log` with in-place truncation and live synchronization. Run `tail -f ~/Library/Logs/Clicky/debug.log` to watch the full agent pipeline live. |
 

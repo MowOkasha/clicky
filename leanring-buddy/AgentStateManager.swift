@@ -86,6 +86,7 @@ class AgentStateManager: ObservableObject {
         self.lastEscalationFailureReason = nil
         self.taskFailureReason = nil
         self.consecutiveWaitActionCount = 0
+        ObservationStore.shared.reset()
     }
 
     /// Sets or replaces the planned subgoals (e.g., at task start or after replanning).
@@ -122,6 +123,9 @@ class AgentStateManager: ObservableObject {
     /// Records the execution of an action and its result in the compressed history.
     /// Returns `true` if the failure count reached the escalation threshold (`maximumConsecutiveFailuresAllowed`).
     @discardableResult
+    /// Records the execution of an action and its result in the compressed history.
+    /// Returns `true` if the failure count reached the escalation threshold (`maximumConsecutiveFailuresAllowed`).
+    @discardableResult
     func recordActionExecution(
         actionSummary: String,
         resultSummary: String,
@@ -142,7 +146,16 @@ class AgentStateManager: ObservableObject {
             consecutiveWaitActionCount = 0
         }
 
-        let singleLineSummary = "\(actionSummary) -> \(resultSummary)"
+        // Keep action history compact: offload large outputs (>100 chars) to ObservationStore
+        let formattedResult: String
+        if resultSummary.count > 100 {
+            let (_, compactSummary, _) = ObservationStore.shared.store(toolOutput: resultSummary)
+            formattedResult = compactSummary
+        } else {
+            formattedResult = resultSummary.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let singleLineSummary = "\(actionSummary) -> \(formattedResult)"
         compressedActionHistory.append(singleLineSummary)
 
         if effectiveActionSuccess {
@@ -154,7 +167,7 @@ class AgentStateManager: ObservableObject {
             currentSubgoalConsecutiveFailureCount += 1
             let failureDetailMessage = consecutiveWaitActionCount >= 2
                 ? "Stalled: repeated wait without action. Use run_terminal_command to inspect files/system or escalate."
-                : resultSummary
+                : formattedResult
 
             print("⚠️ AgentStateManager: Failure on subgoal #\(activeSubgoalIndex + 1) (Count: \(currentSubgoalConsecutiveFailureCount)/\(maximumConsecutiveFailuresAllowed))")
 
@@ -186,7 +199,7 @@ class AgentStateManager: ObservableObject {
         print("✅ AgentStateManager: Completed subgoal. Active index is now \(activeSubgoalIndex)/\(orderedSubgoals.count)")
     }
 
-    /// Records an explicit escalation triggered by the actor model.
+    /// Records an explicit actor escalation triggered by the actor model.
     func recordExplicitActorEscalation(reason: String) {
         if activeSubgoalIndex < orderedSubgoals.count {
             orderedSubgoals[activeSubgoalIndex].status = .failed
@@ -238,8 +251,9 @@ class AgentStateManager: ObservableObject {
             sections.append("Completed Subgoals (Do NOT repeat these, plan ONLY the remaining steps needed to finish the goal):\n\(completedText)")
         }
 
-        // Screen state summary
-        sections.append("Current Screen State:\n\(screenSummaryText)")
+        // Screen state summary (capped to 1,500 chars to avoid prompt bloat)
+        let boundedScreen = screenSummaryText.count > 1500 ? "\(screenSummaryText.prefix(1450))\n[...truncated]" : screenSummaryText
+        sections.append("Current Screen State:\n\(boundedScreen)")
 
         // Recent action history if replanning
         if !compressedActionHistory.isEmpty {
@@ -247,10 +261,12 @@ class AgentStateManager: ObservableObject {
             sections.append("Recent Actions & Results:\n\(recentText)")
         }
 
-        // Retrieved RAG hints (past trajectories / UI maps)
+        // Retrieved RAG hints (capped to 2 hints, max 250 chars each)
         if !retrievedRAGHints.isEmpty {
-            let hintsText = retrievedRAGHints.joined(separator: "\n- ")
-            sections.append("Retrieved Context & Past Trajectories (treat as hints):\n- \(hintsText)")
+            let boundedHints = retrievedRAGHints.prefix(2).map { hint in
+                hint.count > 250 ? "\(hint.prefix(245))..." : hint
+            }
+            sections.append("Retrieved Context & Past Trajectories (treat as hints):\n- \(boundedHints.joined(separator: "\n- "))")
         }
 
         // Failure note if this is a replan invocation
@@ -262,20 +278,15 @@ class AgentStateManager: ObservableObject {
     }
 
     /// Constructs user prompt for the initial triage turn of a new task (before subgoals exist).
+    /// Kept minimal (~50-100 tokens) to guarantee sub-second triage decisions and zero RAG pollution.
     func constructActorTriageUserPrompt(currentUIStateText: String) -> String {
         var sections: [String] = []
 
         // User goal
-        sections.append("User Goal:\n\(userGoal)")
+        sections.append("User Request:\n\(userGoal)")
 
-        // Current Screen UI State
-        sections.append("Current Screen UI State:\n\(currentUIStateText)")
-
-        // RAG hints
-        if !retrievedRAGHints.isEmpty {
-            let hintsText = retrievedRAGHints.joined(separator: "\n- ")
-            sections.append("Retrieved Context & Past Trajectories:\n- \(hintsText)")
-        }
+        // Current Screen Context (just frontmost app & window)
+        sections.append("Screen Context:\n\(currentUIStateText)")
 
         return sections.joined(separator: "\n\n")
     }
@@ -290,10 +301,11 @@ class AgentStateManager: ObservableObject {
         let currentSubgoalDescription = currentActiveSubgoal()?.description ?? userGoal
         sections.append("Current Subgoal:\n\(currentSubgoalDescription)")
 
-        // Current UI State
-        sections.append("Current UI State:\n\(currentUIStateText)")
+        // Current UI State (capped to 2,000 chars)
+        let boundedUI = currentUIStateText.count > 2000 ? "\(currentUIStateText.prefix(1950))\n[...truncated]" : currentUIStateText
+        sections.append("Current UI State:\n\(boundedUI)")
 
-        // Compact history: last few actions and results (one line each)
+        // Compact history: last few actions and results (one line each, max 5 lines)
         if compressedActionHistory.isEmpty {
             sections.append("Action History:\n(No actions taken yet for this task)")
         } else {

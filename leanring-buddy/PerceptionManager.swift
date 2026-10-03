@@ -33,28 +33,16 @@ struct PerceivedUIElement: Identifiable {
 
     /// Formats the element as a concise single-line description for the actor prompt.
     var promptDescription: String {
-        var parts: [String] = []
-        parts.append("id: \(id)")
-
-        // Clean role name: strip "AX" prefix if present
         let cleanRole = role.hasPrefix("AX") ? String(role.dropFirst(2)) : role
-        parts.append("role: \(cleanRole)")
-
+        var desc = "[\(id)] \(cleanRole)"
         if !label.isEmpty {
-            parts.append("label: \"\(label)\"")
+            desc += " \"\(label)\""
         }
         if let value = value, !value.isEmpty, value != label {
-            let truncatedValue = value.count > 40 ? "\(value.prefix(37))..." : value
-            parts.append("value: \"\(truncatedValue)\"")
+            let truncatedValue = value.count > 30 ? "\(value.prefix(27))..." : value
+            desc += " value=\"\(truncatedValue)\""
         }
-
-        let intX = Int(frame.origin.x)
-        let intY = Int(frame.origin.y)
-        let intW = Int(frame.size.width)
-        let intH = Int(frame.size.height)
-        parts.append("frame: (\(intX), \(intY), \(intW), \(intH))")
-
-        return "[\(parts.joined(separator: ", "))]"
+        return desc
     }
 }
 
@@ -76,6 +64,15 @@ struct PerceptionResult {
     let isScreenshotFallbackUsed: Bool
     /// Screenshots captured if fallback was triggered (empty if AX tree was sufficient).
     let fallbackScreenshots: [(data: Data, label: String)]
+
+    /// Compact summary for fast triage evaluation (avoids element dumping on chit-chat or tool routing)
+    var triageSummaryText: String {
+        var summary = "Frontmost App: \(frontmostApplicationName)"
+        if !activeWindowTitle.isEmpty && activeWindowTitle != "Untitled Window" {
+            summary += " | Window: \"\(activeWindowTitle)\""
+        }
+        return summary
+    }
 }
 
 /// Manages UI perception using AXUIElement with fallback to multi-monitor screenshots.
@@ -83,7 +80,7 @@ struct PerceptionResult {
 class PerceptionManager {
 
     /// Maximum number of interactive elements to retain per window to avoid token bloat.
-    private let maximumElementsPerWindow: Int = 180
+    private let maximumElementsPerWindow: Int = 45
 
     /// Maximum recursion depth when traversing the accessibility tree.
     private let maximumTreeTraversalDepth: Int = 12
