@@ -197,15 +197,13 @@ actor LocalVectorStore {
     func findRelevantPastTrajectories(
         queryEmbedding: [Float],
         appName: String? = nil,
-        similarityThreshold: Float = 0.55,
+        similarityThreshold: Float = 0.65,
         maximumResultsLimit: Int = 3
     ) -> [String] {
         guard let db = databasePointer else { return [] }
 
-        var sql = "SELECT task_goal, app_name, trajectory_summary, embedding FROM trajectories"
-        if let app = appName, !app.isEmpty {
-            sql += " WHERE LOWER(app_name) = '\(app.lowercased())'"
-        }
+        // Search all past trajectories without hard application filtering
+        let sql = "SELECT task_goal, app_name, trajectory_summary, embedding FROM trajectories;"
 
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
@@ -225,7 +223,12 @@ actor LocalVectorStore {
             let floatPointer = blobPointer.bindMemory(to: Float.self, capacity: floatCount)
             let storedVector = Array(UnsafeBufferPointer(start: floatPointer, count: floatCount))
 
-            let score = calculateCosineSimilarity(vectorA: queryEmbedding, vectorB: storedVector)
+            var score = calculateCosineSimilarity(vectorA: queryEmbedding, vectorB: storedVector)
+            // App name bonus if matching the active app
+            if let activeApp = appName, !activeApp.isEmpty, app.lowercased() == activeApp.lowercased() {
+                score += 0.05
+            }
+
             if score >= similarityThreshold {
                 let hint = "Past trajectory for \(app) (\"\(taskGoal)\", similarity: \(String(format: "%.2f", score))):\n\(summary)"
                 scoredTrajectories.append((similarity: score, hint: hint))

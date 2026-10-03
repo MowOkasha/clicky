@@ -295,6 +295,7 @@ actor OMLXClient {
     /// - Returns: An array of Floats representing the embedding vector.
     func generateEmbeddingVector(
         for textToEmbed: String,
+        isQuery: Bool = false,
         model: String = OMLXClient.embedderModelAlias
     ) async throws -> [Float] {
         let endpointURL = serverBaseURL.appendingPathComponent("embeddings")
@@ -306,9 +307,17 @@ actor OMLXClient {
             urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
 
+        // Qwen asymmetric retrieval formatting
+        let formattedInput: String
+        if isQuery {
+            formattedInput = "Instruct: Given a task goal, retrieve relevant past execution trajectories\nQuery: \(textToEmbed)"
+        } else {
+            formattedInput = textToEmbed
+        }
+
         let requestBody: [String: Any] = [
             "model": model,
-            "input": textToEmbed
+            "input": formattedInput
         ]
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 

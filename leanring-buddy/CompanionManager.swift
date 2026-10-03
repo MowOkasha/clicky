@@ -582,7 +582,7 @@ final class CompanionManager: ObservableObject {
                 // Step 2: Local RAG Lookup (Embedder + in-process vector store)
                 var retrievedRAGHints: [String] = []
                 do {
-                    let queryEmbedding = try await omlxClient.generateEmbeddingVector(for: transcript)
+                    let queryEmbedding = try await omlxClient.generateEmbeddingVector(for: transcript, isQuery: true)
                     let pastTrajectories = await localVectorStore.findRelevantPastTrajectories(
                         queryEmbedding: queryEmbedding,
                         appName: initialPerception.frontmostApplicationName
@@ -837,11 +837,11 @@ final class CompanionManager: ObservableObject {
                         failureReason: actorResult.isTaskSuccessful ? nil : agentStateManager.taskFailureReason
                     ))
 
-                    // Step 9: On task success, write trajectory back into RAG store
-                    if actorResult.isTaskSuccessful {
+                    // Step 9: On clean task success (no replans), write trajectory back into RAG store
+                    if actorResult.isTaskSuccessful && replanAttemptsCount == 0 {
                         let trajectorySummary = agentStateManager.buildCompletedTrajectorySummary()
                         Task {
-                            if let embedding = try? await omlxClient.generateEmbeddingVector(for: transcript) {
+                            if let embedding = try? await omlxClient.generateEmbeddingVector(for: transcript, isQuery: false) {
                                 await localVectorStore.saveSuccessfulTrajectory(
                                     taskGoal: transcript,
                                     appName: initialPerception.frontmostApplicationName,
