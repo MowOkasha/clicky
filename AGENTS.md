@@ -60,6 +60,10 @@ User speaks (ctrl+option held)
 
 **State Lives Outside the Model**: Task state (goal, plan, step history, RAG hits) lives in Clicky's own app layer (`AgentStateManager`), not in model context. Every call reconstructs the prompt fresh from that state.
 
+**Context Efficiency & Observation Offloading**: Large tool execution outputs (terminal outputs, webpages, command responses) are offloaded to disk via `ObservationStore` in `~/Library/Caches/Clicky/obs/` and represented as compact previews in the action history. Triage prompts are decoupled from element dumping and limited to ~100 tokens, maintaining snappy sub-second responsiveness.
+
+**In-Process Conversation Memory & Semantic Facts**: Short-term dialogue exchanges and recent task outcomes are retained in-process via `ConversationMemoryManager` and supplied to follow-up triage turns. Persistent user preferences and facts are embedded with Qwen asymmetric retrieval (`Instruct:` prefix) and stored in SQLite via Accelerate `vDSP`.
+
 **Accessibility Tree First, Screenshot Fallback**: Rather than capturing multi-monitor screenshots for every step, Clicky traverses the active window's `AXUIElement` tree. This provides exact coordinates, labels, and roles with zero vision model latency. Screen capture is reserved solely as a fallback for non-accessible apps (games, custom canvases).
 
 **Pure Swift In-Process RAG**: The local vector store runs directly in-process via macOS system SQLite (`libsqlite3`) and calculates cosine similarity using Apple's Accelerate framework (`vDSP`). No external Python sidecars or external vector databases required.
@@ -71,13 +75,13 @@ User speaks (ctrl+option held)
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1310 | Central state machine. Coordinates push-to-talk, intelligent triage, perception, RAG lookup, planner, actor loop, TTS, element pointing, spoken tool synthesis, and task dock. |
-| `OMLXClient.swift` | ~475 | HTTP client wrapper for oMLX OpenAI-compatible endpoints (`localhost:8000/v1`) and admin API. Configured for single resident 9B model + embedder with no swapping. |
-| `PerceptionManager.swift` | ~380 | UI perception layer. Reads the `AXUIElement` hierarchy for active windows and falls back to ScreenCaptureKit screenshots only when permitted and necessary. |
-| `AgentStateManager.swift` | ~320 | External task state manager. Owns task goal, subgoals, compressed 1-line action history, stall detection, and failure counters outside model context. |
-| `AgentPlanner.swift` | ~190 | Planner orchestrator using `qwen3.5-9b`. Houses verbatim planner prompt, turns goal + screen state + RAG hints into ordered subgoals JSON with terminal and AppleScript preference. |
-| `AgentActorLoop.swift` | ~1110 | Execution loop using resident `qwen3.5-9b`. Evaluates first-turn triage, executes atomic tool calls with terminal & AppleScript preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
-| `AgentToolExecutor.swift` | ~630 | Executes agent tools: run_applescript (direct osascript via stdin with safety timeout), run_terminal_command (zsh with PATH resolution), click (AXUIElement with CGEvent fallback), type, scroll, point, open_app, wait, done, escalate, and clipboard. |
+| `CompanionManager.swift` | ~1250 | Central state machine. Coordinates push-to-talk, intelligent triage, perception, RAG lookup, planner, actor loop, TTS, element pointing, spoken tool synthesis, and task dock. |
+| `OMLXClient.swift` | ~430 | HTTP client wrapper for oMLX OpenAI-compatible endpoints (`localhost:8000/v1`) and admin API. Configured for single resident 9B model + embedder with no swapping. |
+| `PerceptionManager.swift` | ~430 | UI perception layer. Reads the `AXUIElement` hierarchy for active windows, caps web area DOM recursion, detects active Safari tab URLs, and falls back to ScreenCaptureKit screenshots only when permitted and necessary. |
+| `AgentStateManager.swift` | ~350 | External task state manager. Owns task goal, subgoals, compressed 1-line action history, stall detection, and failure counters outside model context. |
+| `AgentPlanner.swift` | ~210 | Planner orchestrator using `qwen3.5-9b`. Houses verbatim planner prompt, turns goal + screen state + RAG hints into ordered subgoals JSON with terminal and AppleScript preference. |
+| `AgentActorLoop.swift` | ~1040 | Execution loop using resident `qwen3.5-9b`. Evaluates first-turn triage, executes atomic tool calls with terminal & AppleScript preference, argument parsing, stall prevention, and spoken answer/failure synthesis. |
+| `AgentToolExecutor.swift` | ~600 | Executes agent tools: run_applescript (direct osascript via stdin with safety timeout), run_terminal_command (zsh with PATH resolution), click (AXUIElement with CGEvent fallback), type, scroll, point, open_app, wait, done, escalate, and clipboard. |
 | `LocalVectorStore.swift` | ~350 | Pure Swift in-process SQLite vector store with Accelerate `vDSP` cosine similarity for trajectories, per-app UI maps, and user facts. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
 | `CompanionPanelView.swift` | ~700 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
