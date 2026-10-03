@@ -96,41 +96,41 @@ struct OMLXRawFunctionCall: Codable {
 
 /// Client that manages HTTP communication with the local oMLX OpenAI-compatible endpoints.
 actor OMLXClient {
-
+    
     // MARK: - Constants & Aliases
-
+    
     /// Base URL for the oMLX OpenAI-compatible endpoints.
     let serverBaseURL: URL
-
+    
     /// URLSession instance used for network requests.
     private let urlSession: URLSession
-
+    
     /// Model alias for the actor / execution model (pinned, resident).
     static let actorModelAlias: String = "qwen3.5-9b"
-
+    
     /// Model alias for the planner model (pinned, resident).
     static let plannerModelAlias: String = "qwen3.5-9b"
-
+    
     /// Model alias for the embedding model (pinned, resident).
     /// In oMLX, Qwen3-Embedding-0.6B is registered as "qwen3-embed".
     static let embedderModelAlias: String = "qwen3-embed"
-
+    
     /// Cached API key.
     private var cachedAPIKey: String?
-
+    
     // MARK: - Initialization
-
+    
     init(serverBaseURL: URL = URL(string: "http://localhost:8000/v1")!) {
         self.serverBaseURL = serverBaseURL
-
+        
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 180.0
         configuration.timeoutIntervalForResource = 300.0
         self.urlSession = URLSession(configuration: configuration)
     }
-
+    
     // MARK: - API Key Resolution
-
+    
     /// Resolves the oMLX API key by checking explicit configuration, UserDefaults,
     /// environment variables, and reading ~/.omlx/settings.json created during initial setup.
     func resolveAPIKey() -> String? {
@@ -143,7 +143,7 @@ actor OMLXClient {
             self.cachedAPIKey = key
             return key
         }
-
+        
         // Auto-discover from ~/.omlx/settings.json
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
         let settingsURL = homeDirectory.appendingPathComponent(".omlx/settings.json")
@@ -155,12 +155,12 @@ actor OMLXClient {
             print("🔑 OMLXClient: Auto-discovered API key from ~/.omlx/settings.json")
             return apiKey
         }
-
+        
         return nil
     }
-
+    
     // MARK: - Chat Completions
-
+    
     /// Sends a chat completion request to oMLX and returns the assistant's response.
     ///
     /// - Parameters:
@@ -182,11 +182,11 @@ actor OMLXClient {
         var urlRequest = URLRequest(url: endpointURL)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
+        
         if let apiKey = resolveAPIKey() {
             urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
-
+        
         // Build serialized messages array
         var serializedMessages: [[String: Any]] = []
         for message in messages {
@@ -195,33 +195,33 @@ actor OMLXClient {
                 "content": message.content.encodeToOpenAIFormat()
             ])
         }
-
+        
         var requestBody: [String: Any] = [
             "model": model,
             "messages": serializedMessages,
             "temperature": temperature,
             "stream": false
         ]
-
+        
         if let maxTokens = maxTokens {
             requestBody["max_tokens"] = maxTokens
         }
-
+        
         if let responseFormat = responseFormat {
             requestBody["response_format"] = responseFormat
         }
-
+        
         if !enableThinking {
             requestBody["enable_thinking"] = false
             requestBody["chat_template_kwargs"] = ["enable_thinking": false]
         }
-
+        
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
-
+        
         let startTime = Date()
         let (data, httpResponse) = try await urlSession.data(for: urlRequest)
         let duration = Date().timeIntervalSince(startTime)
-
+        
         guard let httpURLResponse = httpResponse as? HTTPURLResponse else {
             throw NSError(
                 domain: "OMLXClientError",
@@ -229,7 +229,7 @@ actor OMLXClient {
                 userInfo: [NSLocalizedDescriptionKey: "Invalid response received from oMLX server"]
             )
         }
-
+        
         guard (200...299).contains(httpURLResponse.statusCode) else {
             let responseBodyString = String(data: data, encoding: .utf8) ?? "Unknown server error"
             throw NSError(
@@ -238,7 +238,7 @@ actor OMLXClient {
                 userInfo: [NSLocalizedDescriptionKey: "oMLX server returned HTTP \(httpURLResponse.statusCode): \(responseBodyString)"]
             )
         }
-
+        
         // Parse standard OpenAI chat completion JSON response
         guard let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = jsonObject["choices"] as? [[String: Any]],
@@ -250,14 +250,14 @@ actor OMLXClient {
                 userInfo: [NSLocalizedDescriptionKey: "Failed to parse OpenAI choices payload from oMLX response"]
             )
         }
-
+        
         let contentText = messagePayload["content"] as? String ?? ""
-
+        
         // Extract token usage from the OpenAI-compatible usage field oMLX returns
         let usagePayload = jsonObject["usage"] as? [String: Any]
         let promptTokenCount = usagePayload?["prompt_tokens"] as? Int ?? 0
         let completionTokenCount = usagePayload?["completion_tokens"] as? Int ?? 0
-
+        
         var parsedToolCalls: [OMLXRawToolCall] = []
         if let rawToolCallsArray = messagePayload["tool_calls"] as? [[String: Any]] {
             for rawToolCallDictionary in rawToolCallsArray {
@@ -275,7 +275,7 @@ actor OMLXClient {
                 }
             }
         }
-
+        
         return OMLXChatCompletionResponse(
             contentText: contentText,
             toolCalls: parsedToolCalls,
@@ -284,9 +284,9 @@ actor OMLXClient {
             completionTokens: completionTokenCount
         )
     }
-
+    
     // MARK: - Embeddings
-
+    
     /// Generates a vector embedding for the provided text using the embedding model.
     ///
     /// - Parameters:
@@ -302,11 +302,11 @@ actor OMLXClient {
         var urlRequest = URLRequest(url: endpointURL)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
+        
         if let apiKey = resolveAPIKey() {
             urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
-
+        
         // Qwen asymmetric retrieval formatting
         let formattedInput: String
         if isQuery {
@@ -314,15 +314,15 @@ actor OMLXClient {
         } else {
             formattedInput = textToEmbed
         }
-
+        
         let requestBody: [String: Any] = [
             "model": model,
             "input": formattedInput
         ]
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
-
+        
         let (data, httpResponse) = try await urlSession.data(for: urlRequest)
-
+        
         guard let httpURLResponse = httpResponse as? HTTPURLResponse,
               (200...299).contains(httpURLResponse.statusCode) else {
             let responseBodyString = String(data: data, encoding: .utf8) ?? "Unknown server error"
@@ -332,7 +332,7 @@ actor OMLXClient {
                 userInfo: [NSLocalizedDescriptionKey: "Failed to generate embedding: \(responseBodyString)"]
             )
         }
-
+        
         guard let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataArray = jsonObject["data"] as? [[String: Any]],
               let firstEntry = dataArray.first,
@@ -343,30 +343,30 @@ actor OMLXClient {
                 userInfo: [NSLocalizedDescriptionKey: "Failed to parse embedding vector from response"]
             )
         }
-
+        
         return embeddingFloats.map { Float($0) }
     }
-
+    
     // MARK: - Admin Endpoints & Model Swapping (Mutual Exclusion: 4B vs 9B)
-
+    
     private var adminBaseURL: URL {
         return serverBaseURL.deletingLastPathComponent().appendingPathComponent("admin/api")
     }
-
+    
     private var hasAuthenticatedAdminSession: Bool = false
-
+    
     /// Logs into the oMLX admin API using the configured API key to obtain a session cookie.
     private func ensureAdminSession() async {
         guard !hasAuthenticatedAdminSession else { return }
         guard let apiKey = resolveAPIKey(), !apiKey.isEmpty else { return }
-
+        
         let loginURL = adminBaseURL.appendingPathComponent("login")
         var request = URLRequest(url: loginURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let payload = ["api_key": apiKey]
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-
+        
         if let (_, response) = try? await urlSession.data(for: request),
            let httpResponse = response as? HTTPURLResponse,
            (200...299).contains(httpResponse.statusCode) {
@@ -374,11 +374,11 @@ actor OMLXClient {
             print("🔑 OMLXClient: Authenticated with oMLX admin session")
         }
     }
-
+    
     /// Sets the pinned status of a model in oMLX via PUT /admin/api/models/{model_id}/settings.
     func setPinStatus(modelId: String, isPinned: Bool) async throws {
         await ensureAdminSession()
-
+        
         let settingsURL = adminBaseURL.appendingPathComponent("models").appendingPathComponent(modelId).appendingPathComponent("settings")
         var request = URLRequest(url: settingsURL)
         request.httpMethod = "PUT"
@@ -388,7 +388,7 @@ actor OMLXClient {
         }
         let payload: [String: Any] = ["is_pinned": isPinned]
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-
+        
         do {
             let (_, response) = try await urlSession.data(for: request)
             if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
@@ -399,6 +399,28 @@ actor OMLXClient {
         } catch {
             print("⚠️ OMLXClient: Network error setting pin for \(modelId): \(error)")
         }
+    }
+
+    /// Explicitly unloads an idle model from oMLX via POST /admin/api/models/{model_id}/unload.
+    func unloadModel(modelId: String) async throws {
+        await ensureAdminSession()
+
+        let unloadURL = adminBaseURL.appendingPathComponent("models").appendingPathComponent(modelId).appendingPathComponent("unload")
+        var request = URLRequest(url: unloadURL)
+        request.httpMethod = "POST"
+        if let apiKey = resolveAPIKey() {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        do {
+            let (_, response) = try await urlSession.data(for: request)
+            if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 400 {
+                print("🧹 OMLXClient: Unloaded \(modelId) from memory")
+            }
+        } catch {
+            print("⚠️ OMLXClient: Network error unloading \(modelId): \(error)")
+        }
+    }
 
     /// In single-model mode (9B only), the 9B model handles both planning and execution.
     /// No swapping is performed, eliminating model reload latency.
@@ -424,4 +446,3 @@ actor OMLXClient {
         try? await setPinStatus(modelId: OMLXClient.actorModelAlias, isPinned: true)
     }
 }
-

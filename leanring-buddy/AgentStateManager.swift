@@ -123,9 +123,6 @@ class AgentStateManager: ObservableObject {
     /// Records the execution of an action and its result in the compressed history.
     /// Returns `true` if the failure count reached the escalation threshold (`maximumConsecutiveFailuresAllowed`).
     @discardableResult
-    /// Records the execution of an action and its result in the compressed history.
-    /// Returns `true` if the failure count reached the escalation threshold (`maximumConsecutiveFailuresAllowed`).
-    @discardableResult
     func recordActionExecution(
         actionSummary: String,
         resultSummary: String,
